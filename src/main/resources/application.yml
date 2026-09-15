@@ -1,0 +1,26 @@
+# 1. 服务端口配置
+server:
+  port: 8080
+
+# 2. Spring 基础配置
+spring:
+  application:
+    name: Learning # 项目名称
+  # 数据库账号密码等敏感信息放在 application-local.yml（该文件已被 .gitignore 忽略，不会提交到 GitHub）
+  profiles:
+    active: local
+
+# 3. MyBatis-Plus 核心配置
+# 注意：用的是 MyBatis-Plus，配置前缀必须是 mybatis-plus，写成 mybatis 不会生效
+mybatis-plus:
+  # Mapper XML 文件的存放路径（对应 src/main/resources/mapper/ 目录）
+  mapper-locations: classpath:mapper/*.xml
+
+  # 实体类所在的包路径（配置后，XML 里的 resultType 可以简写类名，不用写全路径）
+  type-aliases-package: com.jiangpa.pojo
+
+  configuration:
+    # 开启驼峰命名映射（数据库的 user_name 自动映射为 Java 的 userName）
+    map-underscore-to-camel-case: true
+    # 控制台打印执行的 SQL 语句及参数（开发调试阶段建议开启）
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
