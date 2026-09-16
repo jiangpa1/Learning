@@ -3,9 +3,6 @@ package com.jiangpa.controller;
 import com.jiangpa.common.Result;
 import com.jiangpa.dto.CategoryDTO;
 import com.jiangpa.service.CategoryService;
-import org.springframework.beans.factory.annotation.Autowired;
-
-
 import org.springframework.web.bind.annotation.*;
 
 import javax.validation.Valid;
@@ -13,8 +10,12 @@ import javax.validation.Valid;
 @RestController
 @RequestMapping("/category")
 public class CategoryController {
-    @Autowired
-    private CategoryService categoryService;
+
+    private final CategoryService categoryService;
+
+    public CategoryController(CategoryService categoryService) {
+        this.categoryService = categoryService;
+    }
 
     @GetMapping("/list")
     public Result<?> selectCategoryList(){

@@ -4,8 +4,6 @@ package com.jiangpa.controller;
 import com.jiangpa.common.Result;
 import com.jiangpa.dto.ArticleDTO;
 import com.jiangpa.service.ArticleService;
-
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
 
 import javax.validation.Valid;
@@ -13,8 +11,12 @@ import javax.validation.Valid;
 @RestController
 @RequestMapping("/article")
 public class ArticleController {
-    @Autowired
-    private ArticleService articleService;
+
+    private final ArticleService articleService;
+
+    public ArticleController(ArticleService articleService) {
+        this.articleService = articleService;
+    }
 
     //查找文章
     @GetMapping("/{id}")

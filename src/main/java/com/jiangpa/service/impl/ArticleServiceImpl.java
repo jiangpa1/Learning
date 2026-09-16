@@ -3,10 +3,13 @@ package com.jiangpa.service.impl;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.core.metadata.IPage;
+
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 
 
-
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.jiangpa.common.CacheKeys;
 import com.jiangpa.common.PageResult;
 import com.jiangpa.dto.ArticleDTO;
 import com.jiangpa.exception.BusinessException;
@@ -18,7 +21,9 @@ import com.jiangpa.service.ArticleService;
 
 import com.jiangpa.vo.ArticleDetailVO;
 import com.jiangpa.vo.ArticleListVO;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.BeanUtils;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
@@ -26,22 +31,30 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 @Service
+@Slf4j
 public class ArticleServiceImpl implements ArticleService {
     private final ArticleMapper articleMapper;
     private final UserMapper userMapper;
+    private final StringRedisTemplate stringRedisTemplate;
+    private final ObjectMapper objectMapper;
 
 
-    public ArticleServiceImpl(ArticleMapper articleMapper, UserMapper userMapper) {
+    public ArticleServiceImpl(ArticleMapper articleMapper, UserMapper userMapper, StringRedisTemplate stringRedisTemplate, ObjectMapper objectMapper) {
         this.articleMapper = articleMapper;
         this.userMapper = userMapper;
-
+        this.stringRedisTemplate = stringRedisTemplate;
+        this.objectMapper = objectMapper;
     }
+
     @Override
-    public ArticleDetailVO selectArticleById(Long id) {
-        Article article = articleMapper.selectById(id);
+    public ArticleDetailVO selectArticleById(Long id){
+        //引入redis之前
+        /*Article article = articleMapper.selectById(id);
         if (article == null) {
             throw new BusinessException(404, "文章不存在！");
         }
@@ -55,7 +68,58 @@ public class ArticleServiceImpl implements ArticleService {
         viewWrapper.eq(Article::getId, id).setSql("view_count = view_count + 1");
         articleMapper.update(null, viewWrapper);
 
-        articleDetailVO.setViewCount(article.getViewCount() + 1);
+        articleDetailVO.setViewCount(article.getViewCount() + 1);*/
+
+        //引入redis后
+        String detailKey = CacheKeys.articleDetail(id);
+        String viewsKey = CacheKeys.articleViews(id);
+
+        String cached = stringRedisTemplate.opsForValue().get(detailKey);
+        if(cached != null) {
+            if (CacheKeys.NULL_SENTINEL.equals(cached)) {
+                throw new BusinessException(404, "文章不存在！");
+            }
+            ArticleDetailVO articleDetailVO;
+            try {
+                 articleDetailVO = objectMapper.readValue(cached, ArticleDetailVO.class);
+                 Long views = stringRedisTemplate.opsForValue().increment(viewsKey);
+                 articleDetailVO.setViewCount(views);
+                 return articleDetailVO;
+            } catch (JsonProcessingException e) {
+                log.warn("缓存反序列化失败，按 miss 处理，key={}", detailKey, e);
+                stringRedisTemplate.delete(detailKey);
+            }
+
+        }
+
+        Article article = articleMapper.selectById(id);
+        if (article == null) {
+            stringRedisTemplate.opsForValue().set(detailKey, CacheKeys.NULL_SENTINEL, 2, TimeUnit.MINUTES);
+            throw new BusinessException(404, "文章不存在！");
+        }
+
+        ArticleDetailVO articleDetailVO = new ArticleDetailVO();
+        User author = userMapper.selectById(article.getUserId());
+
+        BeanUtils.copyProperties(article, articleDetailVO);
+        articleDetailVO.setAuthorNickname(author == null ? null : author.getNickname());
+
+        stringRedisTemplate.opsForValue().setIfAbsent(viewsKey, String.valueOf(article.getViewCount()));
+        Long views = stringRedisTemplate.opsForValue().increment(viewsKey);
+
+        articleDetailVO.setViewCount(null);
+        long ttl = 30*60 + ThreadLocalRandom.current().nextInt(300);
+        try {
+            stringRedisTemplate.opsForValue().set(detailKey, objectMapper.writeValueAsString(articleDetailVO), ttl, TimeUnit.SECONDS);
+        } catch (JsonProcessingException e) {
+            log.warn("回填缓存失败，不影响本次返回，key={}", detailKey, e);
+        }
+
+        articleMapper.update(null, new LambdaUpdateWrapper<Article>()
+                .eq(Article::getId, id)
+                .set(Article::getViewCount, views));
+
+        articleDetailVO.setViewCount(views);
         return articleDetailVO;
     }
 
@@ -147,6 +211,7 @@ public class ArticleServiceImpl implements ArticleService {
                 .set(Article::getUpdateTime, LocalDateTime.now());
 
         articleMapper.update(null, wrapper);
+        stringRedisTemplate.delete(CacheKeys.articleDetail(id));
     }
 
     @Override
@@ -162,6 +227,8 @@ public class ArticleServiceImpl implements ArticleService {
         }
 
         articleMapper.deleteById(id);
+        stringRedisTemplate.delete(CacheKeys.articleDetail(id));
+        stringRedisTemplate.delete(CacheKeys.articleViews(id));
     }
 
     //列表中文章摘要生成
