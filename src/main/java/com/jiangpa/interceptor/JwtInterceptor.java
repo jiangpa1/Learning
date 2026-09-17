@@ -2,6 +2,7 @@ package com.jiangpa.interceptor;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.jiangpa.common.Result;
+import com.jiangpa.service.TokenService;
 import com.jiangpa.utils.JwtUtils;
 import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.ExpiredJwtException;
@@ -36,14 +37,16 @@ public class JwtInterceptor implements HandlerInterceptor {
 
     private final JwtUtils jwtUtils;
     private final ObjectMapper objectMapper;
+    private final TokenService tokenService;
 
     /**
      * 用构造器注入，不用 @Autowired 字段注入。
      * 好处是依赖关系一目了然，且字段可以声明成 final。
      */
-    public JwtInterceptor(JwtUtils jwtUtils, ObjectMapper objectMapper) {
+    public JwtInterceptor(JwtUtils jwtUtils, ObjectMapper objectMapper, TokenService tokenService) {
         this.jwtUtils = jwtUtils;
         this.objectMapper = objectMapper;
+        this.tokenService = tokenService;
     }
 
     /**
@@ -88,10 +91,20 @@ public class JwtInterceptor implements HandlerInterceptor {
             // parseToken 内部会校验签名和有效期，任何一项不通过都会抛异常
             Claims claims = jwtUtils.parseToken(token);
 
+            if(!jwtUtils.isAccessToken(claims)){
+                writeUnauthorized(response, "token类型错误");
+                return false;
+            }
+
+
+            if(tokenService.isRevoked(token)){
+                writeUnauthorized(response, "登录已失效，请重新登录");
+                return false;
+            }
             // 解析成功，把用户身份挂到当前请求上，供后续 Controller 使用
             // 用 subject 取 userId：JwtUtils 里 setSubject(userId.toString()) 存的是字符串，
             // 这里再转回 Long，比直接从 claims 取数字字段更稳（JSON 数字可能被反序列化成 Integer）
-            request.setAttribute(ATTR_USER_ID, Long.valueOf(claims.getSubject()));
+            request.setAttribute(ATTR_USER_ID, jwtUtils.getUserId(claims));
             request.setAttribute(ATTR_USERNAME, claims.get("username", String.class));
 
             // 返回 true，放行，继续走后面的 Controller

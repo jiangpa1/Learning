@@ -10,7 +10,6 @@ import com.jiangpa.exception.BusinessException;
 import com.jiangpa.mapper.UserMapper;
 import com.jiangpa.pojo.User;
 import com.jiangpa.service.UserService;
-import com.jiangpa.utils.JwtUtils;
 import com.jiangpa.vo.UserVO;
 import org.springframework.beans.BeanUtils;
 
@@ -23,17 +22,16 @@ import java.util.ArrayList;
 import java.util.List;
 
 
+
 @Service
 public class UserServiceImpl implements UserService {
 
     private final PasswordEncoder passwordEncoder;
     private final UserMapper userMapper;
-    private final JwtUtils jwtUtils;
 
-    public UserServiceImpl(PasswordEncoder passwordEncoder, UserMapper userMapper, JwtUtils jwtUtils) {
+    public UserServiceImpl(PasswordEncoder passwordEncoder, UserMapper userMapper) {
         this.passwordEncoder = passwordEncoder;
         this.userMapper = userMapper;
-        this.jwtUtils = jwtUtils;
     }
 
 
@@ -121,18 +119,19 @@ public class UserServiceImpl implements UserService {
     }
 
     @Override
-    public String login(UserLoginDTO dto) {
-        User exists = userMapper.selectOne(new LambdaQueryWrapper<User>().eq(User::getUsername, dto.getUsername()));
-        if (exists == null) {
+    public UserVO authenticate(UserLoginDTO dto) {
+        User user = userMapper.selectOne(new LambdaQueryWrapper<User>().eq(User::getUsername, dto.getUsername()));
+        if (user == null) {
             throw new BusinessException(400, "用户名或密码错误");
         }
 
-        if (!passwordEncoder.matches(dto.getPassword(), exists.getPassword())) {
+        if (!passwordEncoder.matches(dto.getPassword(), user.getPassword())) {
             throw new BusinessException(400, "用户名或密码错误");
         }
 
-        return jwtUtils.generateToken(exists.getId(), exists.getUsername());
+        UserVO userVO = new UserVO();
+        BeanUtils.copyProperties(user, userVO);
+
+        return userVO;
     }
-
-
 }

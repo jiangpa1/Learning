@@ -13,7 +13,9 @@ public class JwtProperties {
 
     private String secret;
 
-    private Duration expiration;
+    private Duration accessExpiration;
+
+    private Duration refreshExpiration;
 
     private String issuer;
 }
