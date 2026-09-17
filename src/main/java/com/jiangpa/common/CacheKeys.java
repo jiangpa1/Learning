@@ -8,4 +8,5 @@ public final class CacheKeys {
 
     public static String articleDetail(Long id) { return PREFIX + "article:detail:" + id; }
     public static String articleViews(Long id)  { return PREFIX + "article:views:"  + id; }
+    public static String articleLock(Long id)  { return PREFIX + "article:lock:"  + id; }
 }
