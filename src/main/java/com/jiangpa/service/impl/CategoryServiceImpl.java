@@ -71,7 +71,7 @@ public class CategoryServiceImpl implements CategoryService {
                 new LambdaQueryWrapper<Article>().eq(Article::getCategoryId, id)
         );
         if(n>0){
-            throw new BusinessException("该分类下还有" + n + "篇文章，无法删除");
+            throw new BusinessException("该分类下还有" + n + "篇有效文章，无法删除");
         }
         categoryMapper.deleteById(id);
     }

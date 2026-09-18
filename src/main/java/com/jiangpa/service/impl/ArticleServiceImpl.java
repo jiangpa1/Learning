@@ -211,7 +211,7 @@ public class ArticleServiceImpl implements ArticleService {
         }
 
         articleMapper.deleteById(id);
-        cacheEvict(CacheKeys.articleDetail(id), CacheKeys.articleViews(id));
+        cacheEvict(CacheKeys.articleDetail(id), CacheKeys.articleViews(id), CacheKeys.articleLock(id));
     }
 
     /** 列表中文章摘要生成 */
