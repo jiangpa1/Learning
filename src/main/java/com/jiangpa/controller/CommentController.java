@@ -1,5 +1,6 @@
 package com.jiangpa.controller;
 
+import com.jiangpa.annotation.RateLimit;
 import com.jiangpa.common.Result;
 import com.jiangpa.dto.CommentDTO;
 import com.jiangpa.service.CommentService;
@@ -17,6 +18,7 @@ public class CommentController {
         this.commentService = commentService;
     }
 
+    @RateLimit(limit = 10, window = 1000*60)
     @PostMapping
     public Result<?> addComment(@Valid @RequestBody CommentDTO commentDTO,
                                 @RequestAttribute("userId") Long userId) {

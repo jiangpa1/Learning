@@ -53,12 +53,17 @@ public class Result<T> {
         return new Result<>(401, message, null);
     }
 
-    //5.服务器内部错误:未预期的异常
+    //5.请求过于频繁
+    public static <T> Result<T> overLimit(String message) {
+        return new Result<>(429, message, null);
+    }
+
+    //6.服务器内部错误:未预期的异常
     public static <T> Result<T> error(String message) {
         return new Result<>(500, message, null);
     }
 
-    //6.自定义返回
+    //7.自定义返回
     public static <T> Result<T> build(Integer code, String message, T data) {
         return new Result<>(code, message, data);
     }
