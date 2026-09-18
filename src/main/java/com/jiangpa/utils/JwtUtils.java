@@ -41,18 +41,19 @@ public class JwtUtils {
     }
 
     //动态读取配置生成Token
-    public String generateAccessToken(Long userId, String username) {
-        return generateToken(userId, username, jwtProperties.getAccessExpiration(), TYPE_ACCESS);
+    public String generateAccessToken(Long userId, String username, Integer role) {
+        return generateToken(userId, username, jwtProperties.getAccessExpiration(), TYPE_ACCESS, role);
     }
 
-    public String generateRefreshToken(Long userId, String username) {
-        return generateToken(userId, username, jwtProperties.getRefreshExpiration(), TYPE_REFRESH);
+    public String generateRefreshToken(Long userId, String username, Integer role) {
+        return generateToken(userId, username, jwtProperties.getRefreshExpiration(), TYPE_REFRESH, role);
     }
 
-    private String generateToken(Long userId, String username, Duration ttl, String typ) {
+    private String generateToken(Long userId, String username, Duration ttl, String typ, Integer role) {
         Map<String, Object> claims = new HashMap<>();
         claims.put("id", userId);
         claims.put("username", username);
+        claims.put("role", role);
         claims.put(CLAIM_TYPE, typ);
 
         long nowMillis = System.currentTimeMillis();

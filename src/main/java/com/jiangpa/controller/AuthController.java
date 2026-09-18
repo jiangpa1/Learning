@@ -1,5 +1,6 @@
 package com.jiangpa.controller;
 
+import com.jiangpa.annotation.RateLimit;
 import com.jiangpa.common.Result;
 import com.jiangpa.dto.UserLoginDTO;
 import com.jiangpa.dto.UserRegisterDTO;
@@ -28,17 +29,21 @@ public class AuthController {
     }
 
     //新增用户
+    @RateLimit(limit = 5, window = 1000*60)
     @PostMapping("/register")
     public Result<?> register(@Valid @RequestBody UserRegisterDTO dto) {
         return Result.success(userService.register(dto));
     }
 
+    //登录
+    @RateLimit(limit = 10, window = 1000*60)
     @PostMapping("/login")
     public Result<?> login(@Valid @RequestBody UserLoginDTO dto){
         UserVO user = userService.authenticate(dto);
-        return Result.success(tokenService.issue(user.getId(), user.getUsername()));
+        return Result.success(tokenService.issue(user.getId(), user.getUsername(), user.getRole()));
     }
 
+    //登出
     @PostMapping("/logout")
     public Result<?> logout(HttpServletRequest request){
         String authorization = request.getHeader("Authorization");
@@ -46,6 +51,8 @@ public class AuthController {
         return Result.success();
     }
 
+    //刷新登录缓存
+    @RateLimit(limit = 20, window = 1000*60)
     @PostMapping("/refresh")
     public Result<?> refresh(@Valid @RequestBody RefreshDTO dto){
         return Result.success(tokenService.refresh(dto.getRefreshToken()));

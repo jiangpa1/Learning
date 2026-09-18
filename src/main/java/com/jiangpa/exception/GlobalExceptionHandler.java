@@ -30,7 +30,7 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(value = DuplicateKeyException.class)
     public Result<?> handleDuplicateKey(DuplicateKeyException e) {
         log.warn(e.getMessage(), e);
-        return Result.paramError("数据已存在！");
+        return Result.paramError("数据不可复用！");
     }
 
     @ExceptionHandler(value = BusinessException.class)

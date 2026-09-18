@@ -9,6 +9,9 @@ import com.jiangpa.utils.JwtUtils;
 import com.jiangpa.vo.TokenPair;
 import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.ExpiredJwtException;
+import io.jsonwebtoken.JwtException;
+import io.jsonwebtoken.MalformedJwtException;
+import io.jsonwebtoken.security.SignatureException;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
@@ -32,12 +35,17 @@ public class TokenServiceImpl implements TokenService {
     }
 
     @Override
-    public TokenPair issue(Long userId, String username) {
-        String accessToken = jwtUtils.generateAccessToken(userId, username);
-        String refreshToken = jwtUtils.generateRefreshToken(userId, username);
+    public TokenPair issue(Long userId, String username, Integer role) {
+        String accessToken = jwtUtils.generateAccessToken(userId, username, role);
+        String refreshToken = jwtUtils.generateRefreshToken(userId, username, role);
 
-        stringRedisTemplate.opsForValue().set(CacheKeys.tokenRefresh(userId),
-                jwtUtils.hashToken(refreshToken), jwtProperties.getRefreshExpiration());
+        try {
+            stringRedisTemplate.opsForValue().set(CacheKeys.tokenRefresh(userId),
+                    jwtUtils.hashToken(refreshToken), jwtProperties.getRefreshExpiration());
+        } catch (Exception e) {
+            log.warn("登录缓存不可写", e);
+            throw new BusinessException(503, "服务暂时不可用");
+        }
 
         TokenPair tokenPair = new TokenPair();
         tokenPair.setAccessToken(accessToken);
@@ -49,7 +57,21 @@ public class TokenServiceImpl implements TokenService {
 
     @Override
     public TokenPair refresh(String refreshToken) {
-        Claims claims = jwtUtils.parseToken(refreshToken);
+        Claims claims;
+        try {
+            claims = jwtUtils.parseToken(refreshToken);
+        } catch (ExpiredJwtException e) {
+            throw new BusinessException(401, "登录已过期，请重新登陆");
+        }catch (SignatureException | MalformedJwtException e) {
+            // SignatureException：签名对不上，token 被篡改或不是本系统签发的
+            // MalformedJwtException：token 结构损坏，根本不是合法 JWT
+            // 注意 SignatureException 要用 io.jsonwebtoken.security 包下的那个，
+            // io.jsonwebtoken 包下有个同名类已被废弃，catch 错了会捕获不到
+            throw new BusinessException(401, "token 无效");
+        } catch (JwtException e) {
+            // 兜底，接住其余所有 JWT 相关异常，避免漏网后变成 500
+            throw new BusinessException(401, "token 无效");
+        }
 
         if(!jwtUtils.isRefreshToken(claims)){
             throw new BusinessException(401, "token类型错误");
@@ -57,12 +79,19 @@ public class TokenServiceImpl implements TokenService {
 
         Long userId = jwtUtils.getUserId(claims);
 
-        String stored =  stringRedisTemplate.opsForValue().get(CacheKeys.tokenRefresh(userId));
+        String stored = null;
+        try {
+            stored = stringRedisTemplate.opsForValue().get(CacheKeys.tokenRefresh(userId));
+        } catch (Exception e) {
+            log.warn("无法查询到refresh key", e);
+            throw new BusinessException(503, "服务暂时不可用");
+        }
         if(stored == null || !stored.equals(jwtUtils.hashToken(refreshToken))){
             throw new BusinessException(401, "登录已失效，请重新登陆");
         }
 
-        return issue(userId, claims.get("username", String.class));
+        Number role = claims.get("role", Number.class);
+        return issue(userId, claims.get("username", String.class), role == null ? null : role.intValue());
     }
 
     @Override
@@ -77,7 +106,11 @@ public class TokenServiceImpl implements TokenService {
         if(claims == null) return;
 
         Long userId = jwtUtils.getUserId(claims);
-        stringRedisTemplate.delete(CacheKeys.tokenRefresh(userId));
+        try {
+            stringRedisTemplate.delete(CacheKeys.tokenRefresh(userId));
+        } catch (Exception e) {
+            log.warn("删除 refresh key 失败，不影响此次返回", e);
+        }
 
         if (!jwtUtils.isAccessToken(claims)) {
             log.warn("登出时 token 类型不是 access，跳过黑名单");
@@ -86,9 +119,13 @@ public class TokenServiceImpl implements TokenService {
 
         long remaining = jwtUtils.getRemainingMillis(claims);
         if (remaining > 0) {
-            stringRedisTemplate.opsForValue().set(
-                    CacheKeys.tokenBlacklist(jwtUtils.hashToken(token)), "1", remaining, TimeUnit.MILLISECONDS
-            );
+            try {
+                stringRedisTemplate.opsForValue().set(
+                        CacheKeys.tokenBlacklist(jwtUtils.hashToken(token)), "1", remaining, TimeUnit.MILLISECONDS);
+            } catch (Exception e) {
+                log.error("写黑名单失败，登出未生效（fail-closed）", e);
+                throw new BusinessException(503, "认证服务暂时不可用，请稍后重试");
+            }
         }
     }
 

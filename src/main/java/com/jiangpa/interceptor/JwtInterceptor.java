@@ -12,52 +12,33 @@ import io.jsonwebtoken.security.SignatureException;
 import org.springframework.stereotype.Component;
 import org.springframework.web.servlet.HandlerInterceptor;
 
-// 注意：项目是 Spring Boot 2.7，必须用 javax.servlet，不是 jakarta.servlet
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import java.io.IOException;
 
-/**
- * JWT 鉴权拦截器。
- * 职责只有三件事：取 token → 验 token → 把用户身份挂到 request 上。
- * 不查数据库、不判断权限，那些是 Service 层和后续权限系统的事。
- */
 @Component
 public class JwtInterceptor implements HandlerInterceptor {
 
-    /** 请求头名称，约定客户端用 Authorization */
     private static final String HEADER_NAME = "Authorization";
-
-    /** 认证方案前缀。注意后面有一个空格 */
     private static final String PREFIX = "Bearer ";
-
-    /** request attribute 的 key，Controller 里用 @RequestAttribute("userId") 取 */
     private static final String ATTR_USER_ID = "userId";
     private static final String ATTR_USERNAME = "username";
+    private static final String ATTR_ROLE = "role";
 
     private final JwtUtils jwtUtils;
-    private final ObjectMapper objectMapper;
     private final TokenService tokenService;
+    private final ObjectMapper objectMapper;
 
-    /**
-     * 用构造器注入，不用 @Autowired 字段注入。
-     * 好处是依赖关系一目了然，且字段可以声明成 final。
-     */
-    public JwtInterceptor(JwtUtils jwtUtils, ObjectMapper objectMapper, TokenService tokenService) {
+    public JwtInterceptor(JwtUtils jwtUtils, TokenService tokenService, ObjectMapper objectMapper) {
         this.jwtUtils = jwtUtils;
-        this.objectMapper = objectMapper;
         this.tokenService = tokenService;
+        this.objectMapper = objectMapper;
     }
 
-    /**
-     * 在 Controller 方法执行之前调用。
-     * 返回 true 放行，返回 false 拦截。
-     */
     @Override
     public boolean preHandle(HttpServletRequest request,
                              HttpServletResponse response,
-                             Object handler) throws Exception {
-
+                             Object handler) throws Exception{
         // ---------- 第 1 步：从请求头里取出 token ----------
         String header = request.getHeader(HEADER_NAME);
 
@@ -106,6 +87,8 @@ public class JwtInterceptor implements HandlerInterceptor {
             // 这里再转回 Long，比直接从 claims 取数字字段更稳（JSON 数字可能被反序列化成 Integer）
             request.setAttribute(ATTR_USER_ID, jwtUtils.getUserId(claims));
             request.setAttribute(ATTR_USERNAME, claims.get("username", String.class));
+            Number role = claims.get("role", Number.class);
+            request.setAttribute(ATTR_ROLE, role == null ? null : role.intValue());
 
             // 返回 true，放行，继续走后面的 Controller
             return true;
@@ -148,4 +131,6 @@ public class JwtInterceptor implements HandlerInterceptor {
         // 用注入的 ObjectMapper 序列化，不要手拼 JSON 字符串——字段名或转义出问题很难查
         response.getWriter().write(objectMapper.writeValueAsString(Result.unauthorized(message)));
     }
+
+
 }
