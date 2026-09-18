@@ -1,6 +1,6 @@
 # HANDOFF — Learning 项目交接说明
 
-> 最后更新：2026-09-17
+> 最后更新：2026-09-18
 > 项目路径：`C:\Users\ASUS\Desktop\Learning`
 > 项目仓库：`jiangpa1/Learning`（分支 `main`）
 > 笔记仓库：`jiangpa1/java-learning`（每日练习与知识库）
@@ -12,9 +12,12 @@
 
 一个 Java 后端学习项目，作者是计算机系大三学生，目标是 2026 年寒假（约 12 月—次年 1 月）找 Java 后端实习。
 
-形态上是一个**简易博客后端**：用户、认证、文章、分类、评论，文章详情带 Redis 缓存。**共 19 个接口**。
+形态上是一个**简易博客后端**：用户、认证、文章、分类、评论，文章详情带 Redis 缓存，另有逻辑删除、角色权限、接口限流三层横切能力。**共 20 个接口**（用户 5 + 认证 4 + 文章 5 + 分类 4 + 评论 3，其中 `PUT /user/role` 为 2026-09-18 新增）。
 
-需要说明的是，这**不是教学 demo**。接口分层、统一响应封装、JWT 鉴权、全局异常处理、分页、跨表查询、并发更新、缓存与缓存一致性这些都是按真实项目的做法来的，代码里刻意避开了不少新手写法。接手或复看时，下面第七节的「关键设计决策」是最需要先读的部分——那些看起来"绕"的写法是为了解决具体问题，不要顺手改回简单版本。
+需要说明的是，这**不是教学 demo**。接口分层、统一响应封装、JWT 双 Token 鉴权、角色权限、逻辑删除、接口限流、全局异常处理、分页、跨表查询、并发更新、缓存与缓存一致性、降级策略这些都是按真实项目的做法来的，代码里刻意避开了不少新手写法。接手或复看时，下面第七节的「关键设计决策」是最需要先读的部分——那些看起来"绕"的写法是为了解决具体问题，不要顺手改回简单版本。
+
+**2026-09-18 一天内完成四块改造**（详见第五节）：逻辑删除、角色权限、refresh 异常处理、接口限流。当天发现并修复了 **7 个真实缺陷**，其中 3 个是"接口不可用"级别，全部有实测记录。
+
 
 ---
 
@@ -39,7 +42,7 @@
 
 ---
 
-## 三、跑起来之前必须做的四件事
+## 三、跑起来之前必须做的五件事
 
 **1. 配 `JWT_SECRET` 环境变量**
 
@@ -53,7 +56,7 @@
 
 **2. 重建 `application-local.yml`**
 
-数据库和 Redis 的账号密码都在这个文件里，已被 `.gitignore` 忽略，换台机器克隆下来是没有的。格式：
+数据库和 Redis 的账号密码都在这个文件里，已被 `.gitignore` 忽略，换台机器克隆下来是没有的。格式（**已随双 Token 改造更新**）：
 
 ```yaml
 spring:
@@ -70,11 +73,14 @@ spring:
     timeout: 3000ms
 jwt:
   secret: ${JWT_SECRET}
-  expiration: 3600000
+  access-expiration: 30m       # ★ 原来的 expiration 已拆成两个
+  refresh-expiration: 7d
   issuer: learning
 ```
 
-> `jwt.expiration` 写 `3600000` 会被 Spring Boot 的 Duration 转换器当成毫秒，也就是 1 小时。
+> **⚠️ 与旧版的差异**：原来的 `jwt.expiration: 3600000`（靠"纯数字被当毫秒"的隐式规则）已**拆成 `access-expiration` / `refresh-expiration`**，值为 Spring 的 Duration 格式（`30m` / `7d`）。写错会在启动时被 `JwtUtils.@PostConstruct` 拦下并抛出"缺少配置"。
+>
+> **⚠️ `spring.redis.timeout` 别调大**：实测 Redis 不可达时，每次失败往返约 2 秒，而一次请求可能撞多次（登录要过限流 + 写 refresh key → 约 5 秒）。超时设大 = Redis 抖动时整站被拖慢。生产建议几百毫秒级。
 
 **3. 建表**
 
@@ -82,13 +88,35 @@ jwt:
 
 **注意实际表名带 `tb_` 前缀**——那份文档里写的是 `category` / `comment`（无前缀），是早期的设计稿，**以库里的 `tb_category` / `tb_comment` 为准**。
 
-`tb_comment` 需要复合索引（见第七节第 13 条）：
+三处必须的 DDL 改动（**2026-09-18 起，库里已应用**）：
 
 ```sql
+-- ① 评论表复合索引
 ALTER TABLE tb_comment ADD INDEX idx_article_create (article_id, create_time);
+DROP INDEX idx_article_id ON tb_comment;      -- 被上一条最左前缀覆盖，冗余
+
+-- ② 逻辑删除字段（四张表都要，NOT NULL DEFAULT 0）
+ALTER TABLE tb_user     ADD COLUMN deleted TINYINT NOT NULL DEFAULT 0;
+ALTER TABLE tb_article  ADD COLUMN deleted TINYINT NOT NULL DEFAULT 0;
+ALTER TABLE tb_category ADD COLUMN deleted TINYINT NOT NULL DEFAULT 0;
+ALTER TABLE tb_comment  ADD COLUMN deleted TINYINT NOT NULL DEFAULT 0;
+
+-- ③ 角色字段
+ALTER TABLE tb_user ADD COLUMN role TINYINT NOT NULL DEFAULT 0 COMMENT '0=user 1=admin' AFTER nickname;
 ```
 
-**4. 确认虚拟机和两个服务都起来了**
+**4. ⚠️ 手工指定第一个管理员（不做则管理接口谁都打不开）**
+
+注册接口硬编码 `role = 0`（普通用户），这是 fail-safe 设计。所以第一个管理员只能手工指定：
+
+```sql
+UPDATE tb_user SET role = 1 WHERE username = '你的账号';
+SELECT id, username, role, deleted FROM tb_user;   -- 确认
+```
+
+**不做这一步，加完 role 后 `GET /user/list` 会返回 403（包括你自己）。**
+
+**5. 确认虚拟机和两个服务都起来了**
 
 ```powershell
 Test-Connection 192.168.133.128 -Count 1 -Quiet      # 应为 True
@@ -96,26 +124,40 @@ Test-Connection 192.168.133.128 -Count 1 -Quiet      # 应为 True
 
 MySQL 和 Redis 都在这台虚拟机上。**它经常处于关机状态** —— 动手前先确认能连上，否则写完代码既建不了表也跑不起来测。
 
+
 ---
 
 ## 四、目录结构与分层约定
 
 ```
 com.jiangpa
-├── common        Result、PageResult、CacheKeys   —— 通用返回结构 + 缓存 key 常量
-├── config        SecurityConfig、WebMvcConfig、MybatisPlusConfig
-├── controller    接口层
-├── dto           接收请求参数（带校验注解）
-├── exception     GlobalExceptionHandler、BusinessException
-├── interceptor   JwtInterceptor
-├── mapper        XxxMapper extends BaseMapper<Xxx>
-├── pojo          实体
-├── properties    JwtProperties
-├── service       接口
-├── service.impl  实现
-├── utils         JwtUtils
-└── vo            返回给前端
+├── annotation      RequireRole、RateLimit            —— 权限 / 限流声明式注解
+├── common          Result、PageResult、CacheKeys      —— 通用返回结构 + 缓存 key 常量
+├── config          SecurityConfig、WebMvcConfig、MybatisPlusConfig、RedisLuaConfig
+├── controller      接口层
+├── dto             接收请求参数（带校验注解）
+├── exception       GlobalExceptionHandler、BusinessException
+├── interceptor     JwtInterceptor、AuthorizationInterceptor、RateLimitInterceptor
+├── mapper          XxxMapper extends BaseMapper<Xxx>
+├── pojo            实体
+├── properties      JwtProperties
+├── service         接口
+├── service.impl    实现
+├── utils           JwtUtils、IpUtils
+└── vo              返回给前端
+
+src/main/resources/lua/rate_limit.lua   —— 滑动窗口限流脚本（★ 改它必须重新编译资源）
 ```
+
+**三个拦截器的执行顺序（就是注册顺序，别调换）**：
+
+```
+JwtInterceptor（你是谁，fail-closed）
+  → AuthorizationInterceptor（你能不能干，fail-closed）
+    → RateLimitInterceptor（最后才决定让不让你干，fail-open）
+```
+
+**顺序的三个理由**：① 拿不到 `userId` 就只能按 IP 限流；② 拿不到 `role` 无法按角色设阈值；③ **没权限的请求不该消耗限流额度**（否则攻击者能用"注定 403 的请求"耗掉目标用户/IP 的额度，变成廉价的 DoS 放大器）。
 
 **分层铁律**（改代码时别破坏）：
 
@@ -124,18 +166,30 @@ com.jiangpa
 - **Service 不依赖 Result**（各 Service 接口里都不该出现 `Result` 的 import）。
 - **Service 接口不声明受检异常**。Jackson 的 `JsonProcessingException` 属实现细节，必须就地转成 `BusinessException` 或降级处理，不能污染接口签名。
 - **Mapper** 只管读写数据库，不判断业务规则。
+- **权限规则只在一个地方表达**。`DELETE /user/{id}` 的设计是「自己 **或** 管理员」，所以**不能在 Controller 上加 `@RequireRole`**（那会先按角色拦掉普通用户，Service 里的"删自己"分支永远走不到）。注解和 Service 校验叠加时，行为由执行顺序决定，极难排查。
+
 
 ---
 
 ## 五、已完成
 
 ### 认证（`/auth/**`）
-- `POST /auth/register` 注册，密码用 BCrypt 加密后存
-- `POST /auth/login` 登录，返回 JWT
+- `POST /auth/register` 注册，密码用 BCrypt 加密后存；**硬编码 `role=0`**（see 角色权限一节）
+- `POST /auth/login` 登录，返回**双 Token**（access + refresh + `expiresIn`）
+- `POST /auth/refresh` 续期，**刷新令牌轮转**（一次性凭证，用过即废）
+- `POST /auth/logout` 登出，**access 进黑名单 + 删 refresh key**
 - 登录失败时"用户不存在"和"密码错误"返回**完全相同**的提示和状态码，防止用户名枚举
 
+> **JWT 双 Token 细节见 `md/JWT双Token实现设计文档.md`**。要点：两 token 同密钥、靠 `type` claim 区分（两处都要校验）；refresh 以 `userId` 为 key 存 Redis（天然单端登录）、值是 SHA-256 哈希；黑名单 TTL = token 剩余有效期（不是固定值）；签发时带 `jti`（修过"同秒签发的两个 token 字节级相同 → 轮转静默失效"的缺陷）。
+>
+> **实测过的一处关键行为**：`refresh` 每次成功都把 TTL **重置为满 7 天**（`issue` 传的是常量而非剩余时间）→ 这实际是**滑动窗口续期**，活跃用户永不下线。想改成"登录后 7 天铁定过期"就把 TTL 换成 `getRemainingMillis(claims)`。
+
 ### 用户模块（`/user/**`）
-- 查询单个、查询列表、修改、删除
+- `GET /user/{id}` 查询单个 —— **自己 或 管理员**
+- `GET /user/list` 用户列表（**不分页，待办**）—— **仅管理员**
+- `PUT /user/{id}` 修改昵称 —— **仅本人**（管理员也不能改别人）
+- `DELETE /user/{id}` 删除 —— **自己 或 管理员**
+- `PUT /user/role` **改角色**（`{id, role}`，role 0=降级/1=升级）—— **仅管理员**；含"不能降级最后一个管理员"守卫 + 改角色即作废旧凭证
 - 返回给前端的是 `UserVO`，**不含 password**
 
 ### 文章模块（`/article/**`）
@@ -143,13 +197,13 @@ com.jiangpa
 - `GET /article/list` 分页列表，按创建时间倒序，**只返回摘要不返回正文**
 - `POST /article` 发布，作者 id 从 JWT 取
 - `PUT /article/{id}` 修改，非作者返回 403，**并清理缓存**
-- `DELETE /article/{id}` 删除，非作者返回 403，**并清理内容与浏览量两个 key**
+- `DELETE /article/{id}` 删除，非作者返回 403，**并清理 detail / views / lock 三个 key**
 
 ### 分类模块（`/category/**`）
-- `GET /category/list` 分类列表，**不分页**（分类数量有限），按 id 升序
-- `POST /category` 新增，**先查重**（重名返回 400「分类名已存在」）
-- `PUT /category/{id}` 修改，查重时**排除自己**（`.ne(Category::getId, id)`）
-- `DELETE /category/{id}` 删除，**分类下有文章则拒绝删除**（返回具体篇数）
+- `GET /category/list` 分类列表，**不分页**（分类数量有限），按 id 升序，登录即可
+- `POST /category` 新增 —— **仅管理员**，**先查重**（重名返回 400）
+- `PUT /category/{id}` 修改 —— **仅管理员**，查重时**排除自己**（`.ne(Category::getId, id)`）
+- `DELETE /category/{id}` 删除 —— **仅管理员**，**分类下有有效文章则拒绝删除**（返回具体篇数）
 
 ### 评论模块（`/comment/**`）
 - `POST /comment` 发表，**发表前校验文章存在**（无外键，数据库不会拦）
@@ -162,24 +216,97 @@ com.jiangpa
 - 空值哨兵 `__NULL__` 防穿透（TTL 2 分钟）
 - 浏览量改 Redis `INCR`，缓存 miss 时**惰性回写** DB
 
+### 逻辑删除（2026-09-18 接入并验证）
+四张表统一 `deleted TINYINT NOT NULL DEFAULT 0` + 实体 `@TableLogic`，**Service 层一行没改** —— MP 在执行器层自动改写 SQL（查询拼 `deleted=0`，`deleteById` 变 `UPDATE SET deleted=1`）。
+
+**踩到并记录的两个点**（详见 `md/逻辑删除设计文档.md`）：
+
+1. **唯一索引与逻辑删除冲突**：`uk_user_name` / `uk_name` 覆盖**物理行**（含 `deleted=1`），而应用层查重只看 `deleted=0` → **删掉的名字永远无法复用**，报错还是笼统的"数据已存在！"。四种解法对比后**选「方案 D：明确接受不可复用」**（用户名唯一是常态行为），并把兜底文案改成 `数据不可复用！`。
+2. **删除后必须清缓存**：`deleteArticle` 原来只清 detail + views，**漏了 lock**；更要紧的是 `views` key **不设 TTL**，不清就是**永久垃圾**。现在三个 key 一起清。
+3. **重复删除返回 404 而非 200**：Service 第一行是 `selectById` 判存在，MP 自动过滤 `deleted=0` → 查不到直接 404，**走不到那条 UPDATE**。404 语义更准，保持。
+
+### 角色权限（2026-09-18 接入并验证）
+
+**背景**：修掉一个已实测的越权漏洞 —— 任意登录用户 `DELETE /user/{id}` 能删掉任何人（用户 id 自增，从 1 遍历可删光），`GET /user/list`、`DELETE /category/{id}` 同样无保护。
+
+**机制**：`role` 字段（0=用户 1=管理员）**写进 JWT claim**，`@RequireRole(1)` 注解标在 Controller 方法上，`AuthorizationInterceptor` 读注解比对。
+
+**为什么 role 放 JWT 而不是每请求查库**：零额外查询；代价是角色变更最长 30 分钟才生效（access 有效期）。缓解：**改角色时无条件删该用户的 refresh key**，让他无法续期。
+
+**区分两类越权（关键设计）**：
+
+| 类型 | 例子 | 资源特征 | 机制 |
+| --- | --- | --- | --- |
+| **水平越权** | A 删 B 的账号/文章/评论 | **有主** | 归属校验 → 403 |
+| **纵向越权** | 普通用户删分类、拉用户列表 | **无主（全站资产）** | 角色校验 → 403 |
+
+**归属校验解决不了纵向越权**（全站资产没有所有者可比对），**角色校验也解决不了水平越权**（两个普通用户 role 相同）。**两者正交，缺一不可。**
+
+**权限矩阵**见 `md/角色权限设计文档.md` 第六节。详见该文档第十三节「实现记录」，那里记了 4 个只有测试才能暴露的缺陷。
+
+### 接口限流（2026-09-18 接入并验证）
+- **滑动窗口**（Redis ZSET + Lua 原子脚本），`@RateLimit(limit, window)` 注解声明
+- 维度：**已登录按 `userId`、未登录按 IP**，key 含接口路径（`learning:limit:{维度}:{标识}:{uri}`）
+- 超限返回 **`code=429`**（HTTP 仍 200）+ `X-RateLimit-Limit/Remaining/Reset` + `Retry-After` 头
+- 阈值：login 10/分、register 5/分、refresh 20/分、发文章/评论 10/分、列表 120/分、用户列表 30/分
+
+详见 `md/接口限流设计文档.md` 第十四节「实现记录」。
+
 ### 基础设施
-- `JwtInterceptor` 全局鉴权，放行 `/auth/**` 和 `/error`
+- 三个拦截器（见第四节的顺序约定）
 - `GlobalExceptionHandler` 统一处理参数校验、唯一键冲突、业务异常、兜底异常
 - `MybatisPlusConfig` 分页插件
-- `Result` 支持 200 / 400 / 401 / 403 / 404 / 500
-- `CacheKeys` 集中管理缓存 key 前缀（`learning:`）与空值哨兵
+- `Result` 支持 200 / 400 / 401 / 403 / 404 / 429 / 500（`overLimit` 为限流专用）
+- `CacheKeys` 集中管理 key 前缀（`learning:`）、空值哨兵、限流 key
+
+### 降级策略（四层依赖、两个方向，**全部实测过**）
+
+| Redis 操作 | 层次 | Redis 挂了 | 实测结果 |
+| --- | --- | --- | --- |
+| 缓存（detail/views/lock） | 性能 | **fail-open** 回源查 DB | 接口正常 |
+| 限流 | 性能 | **fail-open** 放行 | 连打 7 次全 200 |
+| 黑名单**读**（`isRevoked`） | 安全 | **fail-closed** 503 | 503「认证服务暂时不可用」 |
+| 黑名单**写**（logout） | 安全 | **fail-closed** 503 | 503 |
+| refresh key **写**（issue） | 认证 | **fail-closed** 503 | 503「服务暂时不可用」 |
+| refresh key **读**（refresh） | 认证 | **fail-closed** 503 | 503 |
+| refresh key **删**（logout） | 认证 | **fail-open** 记录日志 | 登出照常返回 |
+
+**判别规律**：性能层一律放行；安全/认证层的**读和写**要拒绝，但**删除类操作可以放行**（删不掉不产生错误的成功语义）。
+**超时代价**：每次失败往返约 2 秒，一次请求可能撞多次（登录要过限流 + 写 refresh ≈ 5 秒）→ **`spring.redis.timeout` 必须设短**，否则 Redis 抖动会把整站拖死。
+
 
 ---
 
-## 六、进行中 / 已知缺陷
+## 六、已修复的缺陷（保留作为教学案例）
 
-**`selectArticleById` 的缓存击穿防护有实现缺陷**（2026-09-17 审查发现），三处会真的出错：
+> **本节原本标题是「进行中 / 已知缺陷」。2026-09-18 复核：下面三个缺陷已全部修复**，且 F5 之后又补了三条（见第六节之二）。保留原文是因为**这三个坑本身就是好素材**——面试讲"你怎么定位缓存击穿的问题"时可以直接用。
 
-1. **锁加在 DB 查询之后** → 击穿防护实际未生效，每个并发请求仍会查一次 DB
-2. **`wait(1000)` 会抛 `IllegalMonitorStateException`** → `wait()` 必须在 `synchronized` 上下文里调用，该项目没有，走到这个分支必抛异常
-3. **递归调用没 `return`** → `selectArticleById(id);` 的返回值被丢弃，该分支最终返回 `null`
+**① `selectArticleById` 的缓存击穿防护曾有实现缺陷**（2026-09-17 审查发现，2026-09-17 已修）：
 
-详见第七节第 14 条。
+1. ~~**锁加在 DB 查询之后**~~ → 击穿防护实际未生效，每个并发请求仍会查一次 DB
+2. ~~**`wait(1000)` 会抛 `IllegalMonitorStateException`**~~ → `wait()` 必须在 `synchronized` 上下文里调用，该项目没有
+3. ~~**递归调用没 `return`**~~ → `selectArticleById(id);` 的返回值被丢弃，该分支最终返回 `null`
+
+**现状**：锁已包住 DB 查询（`cacheTryLock` 抢到锁后才 `fetchFromDbAndCache`）、等待改用 `Thread.sleep`、递归调用带 `return`。详见第七节第 14 条（那里记录的是**正确写法 + 当初错在哪**）。
+
+### 第六节之二、2026-09-18 发现的七个缺陷（全部已修复并实测）
+
+一天内做完四块改造，过程中发现 7 个真实缺陷，**其中 3 个是"接口不可用"级别**。这类"只有测试才能暴露"的问题价值最高：
+
+| # | 缺陷 | 症状 | 根因 | 教训 |
+| --- | --- | --- | --- | --- |
+| 1 | `claims.get("role", String.class)` | **所有带合法 token 的请求返 401** | jjwt 类型 getter 精确比对，JSON 数字取 String 抛 `RequiredTypeException`（继承 `JwtException`），被拦截器兜底 catch 吃掉 | payload 取值类型必须和写入类型对齐，**用 `Number.class`** |
+| 2 | 权限判断写成 `!A \|\| !B` | **自己看不了自己**（普通用户查自己 403、管理员查别人 403） | 要的是"A 或 B"，拒绝条件应为 `!A && !B` | 权限用例必须**成对测**（该拒的拒 + **该放的放**） |
+| 3 | `@Valid` 漏写（`PUT /user/role`） | `role=9` / `role=-1` / 缺字段**全部 200 并写进 DB** | 约束注解只是元数据，**没有 `@Valid` 就不触发校验** | **发一个越界值验证是否被拒**；字段决定权限时，校验失效=权限模型被绕过 |
+| 4 | 改角色后清 refresh key 的位置错 | **降级形同虚设**：旧 refresh 继续换新 token 并继承旧 role | 清 key 写在 `if (目标当前是管理员)` 内部 → 降级普通用户时不执行；写守卫 `throw` 之后 → 永远到不了 | 作废旧凭证属于"角色变更"这件事，**无条件执行**且放在守卫之后 |
+| 5 | `LocalDateTime.now()` 传给 Lua 脚本 | **所有 `@RateLimit` 接口 500**（含登录/注册） | 脚本 `tonumber(ARGV[1])` 要毫秒数，传对象在参数序列化阶段就抛异常 | 判据：**Redis 里一个限流 key 都没有 = 脚本从未执行** |
+| 6 | ZSET 的 member 也用时间戳 | **限流不触发**：阈值 5 时打 8 次全放行 | ZSET member 重复是**覆盖**不是新增 → 同毫秒请求被合并 → 计数偏少 | member 用 `now .. '-' .. math.random(1000000)`，score 保持纯时间戳 |
+| 7 | `TokenServiceImpl` 三处 Redis 调用无降级 | Redis 挂时 login/logout/refresh 返 **500** | `issue`/`refresh`/`logout` 的 Redis 读写没包 try/catch | 按层次定方向：签发凭证 fail-closed 503；**删 key 可 fail-open**；**写黑名单必须 fail-closed** |
+
+**另有 1 个安全缺陷**：`DELETE /user/{id}` 无归属校验（已实测能删任何人）→ 由角色权限改造一并修复。
+
+> **面试素材**：这 8 条的共同特征是**"症状和根因隔得很远"** —— 症状是"登录 500"，根因是"Lua 参数类型"；症状是"限流偶尔不生效"，根因是"ZSET member 语义"。排查时最有用的一步是**查副作用是否存在**（Redis 里有没有 key、key 里几条），而不是盯着接口返回猜。
+
 
 ---
 
@@ -366,19 +493,22 @@ if (Boolean.TRUE.equals(locked)) {
 
 ## 八、待办清单
 
-按建议的优先级排：
+**2026-09-18 复核**：原清单里「修缓存击穿三缺陷」「逻辑删除」**已完成**，已从表中移除。
 
 | 优先级 | 事项 | 说明 |
 | --- | --- | --- |
-| **高** | **修缓存击穿的三个缺陷** | 锁位置、`wait()` 误用、递归丢返回值 —— 见第七节第 14 条 |
-| 中 | 用户模块列表加分页 | 现在是全表查，参照文章模块的 `PageResult` 写 |
-| 中 | `HttpMessageNotReadableException` 单独处理 | JSON 格式写错、Content-Type 不对时，现在会掉到兜底返回 500，其实应该返 400 |
-| 中 | 逻辑删除 | 现在文章、用户都是物理删除，删了不可恢复。加 `deleted` 字段 + MP 的 `@TableLogic` |
+| 中 | 用户模块列表加分页 | 现在是全表查（`selectList` 无分页），参照文章模块的 `PageResult` 写 |
+| 中 | `HttpMessageNotReadableException` 单独处理 | JSON 格式写错、Content-Type 不对时，现在会掉到兜底返回 500，其实应该返 400。同理 `HttpMediaTypeNotSupportedException` 也未单独处理 |
 | 中 | 文章关联分类的校验 | `POST/PUT /article` 的 `categoryId` 可以存但不校验分类是否存在，会产生悬空引用 |
+| 中 | 分类的删除语义 | 分类是**全站资产**，已限制为"仅管理员"；但"删除分类"和"删除分类下文章"的级联关系没定义，目前是"有文章就拒绝删" |
+| 中 | 逻辑删除的评论级联 | 文章逻辑删除后，它的评论仍在表里（接口因文章 404 而查不到）。**当前选择不级联**，需要产品上确认 |
 | 低 | 列表页浏览量不一致 | `selectArticlesList` 从 DB 读 `view_count`，而 DB 每 30 分钟才回写 → 列表与详情会不一致。要么接受，要么列表也从 Redis 取 |
-| 低 | 改密码接口 | `UserUpdateDTO` 只能改昵称，改密码要单独开接口 |
+| 低 | 改密码接口 | `UserUpdateDTO` 只能改昵称。**注意**：改密码后必须显式删该用户的 refresh key 强制下线（参考 `updateRole` 的做法） |
+| 低 | `PUT /user/{id}/role` 不能改自己 | 当前允许管理员降级自己（有"最后一个管理员"守卫兜住）。如果产品上要禁止，加一条 `id != userId` 校验 |
 | 低 | 分页参数抽公共组件 | 每个列表接口都在重复写 `pageNum`/`pageSize` + 上限截断 |
 | 低 | 提示语统一 | 见第九节 |
+| 低 | 限流阈值调优 | 当前值都是文档 7.2 的**演示值**，非流量观测值 |
+| 低 | 单元测试 | 目前全部靠接口实测（HANDOFF 第十一节），没有 JUnit 测试。简历上"有单测"是加分项 |
 
 ---
 
@@ -387,16 +517,22 @@ if (Boolean.TRUE.equals(locked)) {
 **提示语不统一。** 同一个意思有几种写法：
 
 - 文章不存在：详情接口抛 `"文章不存在！"`（全角感叹号），修改和删除抛 `"文章不存在"`（无标点）
-- 用户名已存在：Service 里查重抛 `"用户名已存在!"`（半角），`GlobalExceptionHandler` 里唯一键冲突兜底返回 `"数据已存在！"`（笼统）
+- 用户名已存在：Service 里查重抛 `"用户名已存在!"`（半角）
 - **作者昵称兜底文案有三处不同**：`ArticleServiceImpl` 的 `toMap` 里是 `"默认昵称"`、`getOrDefault` 里是 `"未知作者"`；`CommentServiceImpl` 里是 `"未知"`。建议统一成两个语义清晰的常量：**用户存在但昵称为空** → 一个文案；**用户查不到（脏数据）** → 另一个文案。
+- `PUT /user/role` 校验失败时文案是 `"权限值只能是 0(降级) 或 1(升级)"` —— 这条已统一，可作为其他文案改写的参考
+
+> ~~唯一键冲突兜底返回"数据已存在！"~~ —— **已改为 `"数据不可复用！"`**（2026-09-18，配合逻辑删除：同一个处理器要服务 user 和 category 两张表，文案不能偏向任何一方）。
 
 **`PageResult` 有个没用的五参数构造器。** 全程用的是 setter，这个构造器是死代码，而且三个连续的 `Long` 参数很容易传错顺序还不会编译报错，建议删掉。
 
 **JwtProperties 用 `@Component` + `@ConfigurationProperties` 绑定。** 能用，但更现代的写法是 `@EnableConfigurationProperties` 或 `@ConfigurationPropertiesScan`。
 
-**`selectArticleById` 里保留了大段注释掉的旧实现。** 项目已有 git，`git show` 就能看历史，注释掉的大段代码会让 review 的人分不清哪段是活的，建议删掉。
+**~~`selectArticleById` 里保留了大段注释掉的旧实现。~~** —— **已删除**（2026-09-18）。
 
 **魔法数字散落。** 空值哨兵的 TTL（2 分钟）、锁的过期时间（10 秒）、detail 的 TTL 基数（30 分钟）都直接写在方法里，建议提到 `CacheKeys` 或常量类里。
+
+**`RateLimitInterceptor` 的两处小瑕疵**：`getMethodAnnotation` 取了两次（第二次的判空是死代码）；`X-RateLimit-*` 头现在正常响应和超限响应都带（已修），但 `Retry-After` 在成功响应里也返回了"距窗口重置还有多久"，语义上略微奇怪（无害）。
+
 
 ---
 
@@ -420,6 +556,14 @@ if (Boolean.TRUE.equals(locked)) {
 | Maven 报 `'dependencies.dependency.version' ... is missing` | MySQL 驱动坐标用了旧的 `mysql:mysql-connector-java`，Spring Boot 2.7.8 起改成了 `com.mysql:mysql-connector-j` |
 | 一堆 `javax.servlet` 找不到符号 | 抄了面向 Spring Boot 3 的教程。**2.7 用 `javax`，不是 `jakarta`** |
 | 拦截器报 `SignatureException` 捕获不到 | jjwt 有两个同名类，要用 `io.jsonwebtoken.security.SignatureException`，`io.jsonwebtoken` 包下那个已废弃 |
+| **所有带 token 的请求返 401「token 无效」** | jjwt 的 `claims.get(name, Class)` 是**精确类型比对**。payload 里 role 是 JSON 数字，用 `String.class` 取会抛 `RequiredTypeException`（继承 `JwtException`）→ 被拦截器兜底 catch 吃掉。**用 `Number.class`** |
+| **`@RateLimit` 接口全部 500**（含登录） | 把 `LocalDateTime.now()` 对象传给 Lua 脚本参数（脚本要 `tonumber`）→ 参数序列化阶段就抛异常。**判据：Redis 里一个限流 key 都没有 = 脚本从未执行**。传 `System.currentTimeMillis()` |
+| **限流不触发/阈值不准** | ZSET 的 member 直接用时间戳 → 同毫秒请求**覆盖**而非新增 → 计数偏少。member 用 `now .. '-' .. math.random(1000000)` |
+| **参数校验完全不生效（越界值也 200）** | `@RequestBody` 参数上**漏了 `@Valid`**。约束注解只是元数据，必须由 `@Valid` 触发。区分：漏 `@Valid` → 静默通过；注解用错类型（如 `@Size` 标 `Integer`）→ 校验器抛 `UnexpectedTypeException` **返 500** |
+| **Redis 挂时登录/登出返 500** | `TokenServiceImpl` 的 Redis 读写没包 try/catch。**方向**：签发凭证 fail-closed 503、写黑名单 fail-closed、删 key 可 fail-open |
+| 用 `javac` 单独编译本项目报"找不到符号 `log`" | `log` 是 Lombok 生成的，编译时**不能加 `-proc:none`**（会关掉注解处理器）。用 IDEA 构建则无此问题 |
+| 静态方法调用报"无法从静态上下文中引用非静态方法" | `IpUtils.getClientIp` 是**实例方法**（和 `JwtUtils` 统一风格，注册成 Bean）。要么用 `ipUtils` 实例调用，要么整体改成静态工具类 —— 别混用 |
+
 
 ---
 
@@ -469,9 +613,47 @@ if (Boolean.TRUE.equals(locked)) {
 | `分类与评论模块接口文档.md` | 分类与评论七个接口的定义、状态码、关键实现点 |
 | `分类与评论模块Postman测试文档.md` | 分类与评论的 24 条测试用例，含并发重名、空值缓存、N+1 验证 |
 | `Redis缓存设计文档.md` | 缓存 key 设计、浏览量方案取舍、序列化要点、六组验证方法 |
+| **`JWT双Token设计文档.md`** | 双 Token 的**方案对比版**（决策前的备选方案） |
+| **`JWT双Token实现设计文档.md`** | ⭐ **决策已定 + 类设计 + 12 条踩坑 + 验证清单 —— 做 JWT 相关工作时先读这份** |
+| **`逻辑删除设计文档.md`** | 四表逻辑删除、`@TableLogic` 改写规则、**唯一索引冲突的四种方案对比**、连带影响回归清单 |
+| **`角色权限设计文档.md`** | role 字段、`@RequireRole` + 授权拦截器、**水平/纵向越权区分**、权限矩阵；第十三节是「实现记录」（4 个测试才暴露的缺陷） |
+| **`接口限流设计文档.md`** | 四种限流算法对比、滑动窗口 + Lua、拦截器顺序、**六处 Redis 依赖的降级实测表**；第十四节是「实现记录」 |
 
 本文件 `LearningHANDOFF.md` 留在**仓库根目录**。
 
-> **已知的文档不一致**：`文章模块接口文档.md` 里的表名写的是 `category` / `comment`（无 `tb_` 前缀），与实际库中的 `tb_category` / `tb_comment` 不符，那份文档是早期设计稿，未回改。
+> **文档约定（2026-09-18 起）**：每份设计文档末尾都有「实现记录」一节，**先写设计 → 实现 → 把实测结果和踩坑回填**。回填后这份文档才够格当面试素材（`角色权限设计文档.md` 第十三节、`接口限流设计文档.md` 第十四节是范本）。
 >
-> 另外「用户模块的修改接口是 `PUT /user`（id 在 body 里）」，跟文章模块的 `PUT /article/{id}`（id 在路径里）风格不一致，建议统一成后者。
+> **已知的文档不一致**：
+> 1. `文章模块接口文档.md` 里的表名写的是 `category` / `comment`（无 `tb_` 前缀），与实际库中的 `tb_category` / `tb_comment` 不符，那份文档是早期设计稿，未回改。
+> 2. `逻辑删除设计文档.md` 6.1 第⑤条写"再次删除同一个 id → 仍返 200"，**实测是 404**（Service 第一行 `selectById` 判存在，MP 自动过滤 `deleted=0`，走不到那条 UPDATE）。**404 更对，应该改文档而不是改代码。**
+> 3. 「用户模块的修改接口是 `PUT /user`（id 在 body 里）」，跟文章模块的 `PUT /article/{id}`（id 在路径里）风格不一致。角色接口 `PUT /user/role` 沿用了 body 风格（两个字段一起校验），保持一致即可。
+
+---
+
+## 十三、本轮（2026-09-18）的验证足迹
+
+**没有单元测试**，全部靠**接口实测 + 数据库/Redis 对账**。当天的回归脚本在 `C:\Users\ASUS\Desktop\java`（**含数据库口令，切勿提交**）：
+
+| 脚本 | 覆盖 |
+| --- | --- |
+| `day42-role-test.ps1` | 角色/归属/提权/404 顺序/refresh 保角色（28 条） |
+| `day42-role-crud-test.ps1` | 改角色接口：校验/守卫/作废凭证（21 条） |
+| `day42-cat-perm-test.ps1` | 分类写接口管理员专属（8 条） |
+| `day42-refresh-fix-test.ps1` | refresh 的 JWT 异常处理（12 条） |
+| `day42-ratelimit-verify.ps1` | 限流阈值/ZSET/响应头（端到端） |
+| `day42-ratelimit-order.ps1` | 拦截器顺序（403 不消耗额度） |
+| `day42-degraded-test.ps1` | 六处 Redis 依赖的降级方向（把 port 改 9999） |
+| `day42-final-regression.ps1` | 19 条全功能回归 |
+
+> **一个值得复用的验证方法**：用**自签 JWT**（从用户作用域取 `JWT_SECRET`，手工拼 header/payload + HMAC-SHA256）来构造"**已过期但签名合法**"或"角色不同"的 token。这样能把"过期分支"和"签名错误分支"彻底分开测，比只发垃圾串有价值得多。
+
+---
+
+## 十四、下一步（2026-09-19 起）
+
+1. **更新本文档的已知不一致**（第十二节第 2 条那个 `逻辑删除设计文档.md`）
+2. 补计算机网络：**HTTP/HTTPS**（TCP 已于 9.16 学完，往应用层走）
+3. 待办清单里的「中」优先级三项：用户列表分页、`HttpMessageNotReadableException`、文章分类校验
+4. 10 月底前完成第二个项目或继续完善本项目（**单元测试 + Docker 部署**是简历加分项）
+5. 11 月启动简历 + JavaGuide 八股文系统刷题
+
