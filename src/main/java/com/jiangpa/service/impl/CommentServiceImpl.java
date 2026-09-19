@@ -5,6 +5,7 @@ import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.jiangpa.common.PageResult;
 import com.jiangpa.dto.CommentDTO;
+import com.jiangpa.dto.PageQueryDTO;
 import com.jiangpa.exception.BusinessException;
 import com.jiangpa.mapper.ArticleMapper;
 import com.jiangpa.mapper.CommentMapper;
@@ -50,13 +51,12 @@ public class CommentServiceImpl implements CommentService {
     }
 
     @Override
-    public PageResult<?> selectCommentList(Long articleId, Integer pageNum, Integer pageSize) {
+    public PageResult<CommentVO> selectCommentList(Long articleId, PageQueryDTO pageQueryDTO) {
         if(articleMapper.selectById(articleId) == null){
             throw new BusinessException(404, "文章不存在");
         }
 
-        pageSize = Math.min(pageSize, 50);
-        Page<Comment> page = new Page<>(pageNum, pageSize);
+        Page<Comment> page = new Page<>(pageQueryDTO.getPageNum(), pageQueryDTO.getPageSize());
 
         LambdaQueryWrapper<Comment> wrapper = new LambdaQueryWrapper<>();
         wrapper.select(Comment::getId, Comment::getArticleId, Comment::getUserId,

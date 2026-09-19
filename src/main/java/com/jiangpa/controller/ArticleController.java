@@ -4,6 +4,7 @@ package com.jiangpa.controller;
 import com.jiangpa.annotation.RateLimit;
 import com.jiangpa.common.Result;
 import com.jiangpa.dto.ArticleDTO;
+import com.jiangpa.dto.PageQueryDTO;
 import com.jiangpa.service.ArticleService;
 import org.springframework.web.bind.annotation.*;
 
@@ -29,9 +30,8 @@ public class ArticleController {
     //查找文章列表
     @RateLimit(limit = 120, window = 1000*60)
     @GetMapping("/list")
-    public Result<?> selectArticlesList(@RequestParam(defaultValue = "1") Integer pageNum,
-                                        @RequestParam(defaultValue = "10") Integer pageSize){
-        return Result.success(articleService.selectArticlesList(pageNum, pageSize));
+    public Result<?> selectArticlesList(@Valid @ModelAttribute PageQueryDTO pageQueryDTO){
+        return Result.success(articleService.selectArticlesList(pageQueryDTO));
     }
 
     //新增文章

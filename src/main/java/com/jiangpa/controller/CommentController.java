@@ -3,6 +3,7 @@ package com.jiangpa.controller;
 import com.jiangpa.annotation.RateLimit;
 import com.jiangpa.common.Result;
 import com.jiangpa.dto.CommentDTO;
+import com.jiangpa.dto.PageQueryDTO;
 import com.jiangpa.service.CommentService;
 import org.springframework.web.bind.annotation.*;
 
@@ -27,9 +28,8 @@ public class CommentController {
 
     @GetMapping("/list")
     public Result<?> selectCommentList(@RequestParam(required = true) Long articleId,
-                                       @RequestParam(defaultValue = "1") Integer pageNum,
-                                       @RequestParam(defaultValue = "10") Integer pageSize){
-        return Result.success(commentService.selectCommentList(articleId, pageNum, pageSize));
+                                       @Valid @ModelAttribute PageQueryDTO pageQueryDTO){
+        return Result.success(commentService.selectCommentList(articleId, pageQueryDTO));
     }
 
     @DeleteMapping("/{id}")

@@ -9,6 +9,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.jiangpa.common.CacheKeys;
 import com.jiangpa.common.PageResult;
 import com.jiangpa.dto.ArticleDTO;
+import com.jiangpa.dto.PageQueryDTO;
 import com.jiangpa.exception.BusinessException;
 import com.jiangpa.mapper.ArticleMapper;
 import com.jiangpa.mapper.CategoryMapper;
@@ -113,9 +114,8 @@ public class ArticleServiceImpl implements ArticleService {
     }
 
     @Override
-    public PageResult<?> selectArticlesList(Integer pageNum, Integer pageSize) {
-        pageSize = Math.min(pageSize, 50);
-        Page<Article> page = new Page<>(pageNum, pageSize);
+    public PageResult<ArticleListVO> selectArticlesList(PageQueryDTO pageQueryDTO) {
+        Page<Article> page = new Page<>(pageQueryDTO.getPageNum(), pageQueryDTO.getPageSize());
 
         LambdaQueryWrapper<Article> wrapper = new LambdaQueryWrapper<>();
         wrapper.select(Article::getId, Article::getTitle, Article::getSummary,
