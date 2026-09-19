@@ -7,10 +7,12 @@ import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.jiangpa.common.CacheKeys;
 import com.jiangpa.common.PageResult;
+import com.jiangpa.dto.PageQueryDTO;
+import com.jiangpa.dto.UpdatePasswordDTO;
 import com.jiangpa.dto.UserLoginDTO;
 import com.jiangpa.dto.UserRegisterDTO;
 import com.jiangpa.dto.UserRoleUpdateDTO;
-import com.jiangpa.dto.UserUpdateDTO;
+import com.jiangpa.dto.UpdateNicknameDTO;
 import com.jiangpa.exception.BusinessException;
 import com.jiangpa.mapper.UserMapper;
 import com.jiangpa.pojo.User;
@@ -25,7 +27,6 @@ import org.springframework.stereotype.Service;
 
 
 import java.time.LocalDateTime;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 
@@ -90,9 +91,8 @@ public class UserServiceImpl implements UserService {
     }
 
     @Override
-    public PageResult<?> selectList(Integer pageNum, Integer pageSize) {
-        pageSize = Math.min(pageSize, 50);
-        Page<User> page = new Page<>(pageNum, pageSize);
+    public PageResult<UserVO> selectList(PageQueryDTO pageQueryDTO) {
+        Page<User> page = new Page<>(pageQueryDTO.getPageNum(), pageQueryDTO.getPageSize());
 
         LambdaQueryWrapper<User> wrapper = new LambdaQueryWrapper<>();
         wrapper.select(User::getId, User::getRole, User::getUsername, User::getNickname);
@@ -112,7 +112,7 @@ public class UserServiceImpl implements UserService {
     }
 
     @Override
-    public void update(UserUpdateDTO dto, Long id, Long userId) {
+    public void updateNickname(UpdateNicknameDTO dto, Long id, Long userId) {
         String nickname = dto.getNickname();
         LocalDateTime updateTime = LocalDateTime.now();
 
@@ -127,6 +127,45 @@ public class UserServiceImpl implements UserService {
         user.setNickname(nickname);
         user.setUpdateTime(updateTime);
         userMapper.updateById(user);
+    }
+
+    @Override
+    public void updatePassword(UpdatePasswordDTO updatePasswordDTO, Long id, Long userId) {
+        User user = userMapper.selectById(id);
+        if (user == null) {
+            throw new BusinessException(404, "用户不存在！");
+        }
+
+        if (!user.getId().equals(userId)) {
+            throw new BusinessException(403, "无权操作他人账号");
+        }
+
+        String oldPassword = updatePasswordDTO.getOldPassword();
+        if (!passwordEncoder.matches(oldPassword, user.getPassword())) {
+            throw new BusinessException(400, "原密码错误");
+        }
+
+        String newPassword = updatePasswordDTO.getNewPassword();
+        if (newPassword.equals(oldPassword)) {
+            throw new BusinessException(400, "新密码不能与旧密码相同");
+        }
+
+        String confirmNewPassword = updatePasswordDTO.getConfirmNewPassword();
+        if (!confirmNewPassword.equals(newPassword)) {
+            throw new BusinessException(400, "两次输入的密码不一致");
+        }
+
+        String encodedPassword = passwordEncoder.encode(newPassword);
+        LocalDateTime updateTime = LocalDateTime.now();
+        user.setPassword(encodedPassword);
+        user.setUpdateTime(updateTime);
+        userMapper.updateById(user);
+
+        try {
+            stringRedisTemplate.delete(CacheKeys.tokenRefresh(user.getId()));
+        } catch (Exception e) {
+            log.warn("删除 refresh key 失败，不影响此次返回", e);
+        }
     }
 
     @Override

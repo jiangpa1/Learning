@@ -3,8 +3,10 @@ package com.jiangpa.controller;
 import com.jiangpa.annotation.RateLimit;
 import com.jiangpa.annotation.RequireRole;
 import com.jiangpa.common.Result;
+import com.jiangpa.dto.PageQueryDTO;
+import com.jiangpa.dto.UpdatePasswordDTO;
 import com.jiangpa.dto.UserRoleUpdateDTO;
-import com.jiangpa.dto.UserUpdateDTO;
+import com.jiangpa.dto.UpdateNicknameDTO;
 import com.jiangpa.service.UserService;
 import org.springframework.web.bind.annotation.*;
 
@@ -24,7 +26,7 @@ public class UserController {
 
     //查找用户
     @GetMapping("/{id}")
-    public Result<?> selectUser(@PathVariable Long id,@RequestAttribute("userId") Long userId, @RequestAttribute("role") Integer role) {
+    public Result<?> selectUser(@PathVariable Long id, @RequestAttribute("userId") Long userId, @RequestAttribute("role") Integer role) {
         return Result.success(userService.selectUser(id, userId, role));
     }
 
@@ -32,16 +34,23 @@ public class UserController {
     @RateLimit(limit = 30, window = 1000*60)
     @RequireRole(1)
     @GetMapping("/list")
-    public Result<?> selectList(@RequestParam(defaultValue = "1") Integer pageNum,
-                                @RequestParam(defaultValue = "10") Integer pageSize){
-        return Result.success(userService.selectList(pageNum, pageSize));
+    public Result<?> selectList(@Valid @ModelAttribute PageQueryDTO pageQueryDTO){
+        return Result.success(userService.selectList(pageQueryDTO));
     }
 
-    //更新用户
-    @PutMapping("/{id}")
-    public Result<?> update(@Valid @RequestBody UserUpdateDTO dto,
+    //更新用户昵称
+    @PutMapping("/nickname/{id}")
+    public Result<?> updateNickname(@Valid @RequestBody UpdateNicknameDTO dto,
                             @PathVariable Long id, @RequestAttribute("userId") Long userId) {
-        userService.update(dto, id, userId);
+        userService.updateNickname(dto, id, userId);
+        return Result.success();
+    }
+
+    //更新用户密码
+    @PutMapping("/password/{id}")
+    public Result<?> updatePassword(@Valid @RequestBody UpdatePasswordDTO updatePasswordDTO,
+                                    @PathVariable Long id, @RequestAttribute("userId") Long userId){
+        userService.updatePassword(updatePasswordDTO, id, userId);
         return Result.success();
     }
 
@@ -60,4 +69,5 @@ public class UserController {
         userService.updateRole(userRoleUpdateDTO);
         return Result.success();
     }
+
 }
