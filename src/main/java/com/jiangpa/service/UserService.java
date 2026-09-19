@@ -2,6 +2,7 @@ package com.jiangpa.service;
 
 
 
+import com.jiangpa.common.PageResult;
 import com.jiangpa.dto.UserLoginDTO;
 import com.jiangpa.dto.UserRegisterDTO;
 import com.jiangpa.dto.UserRoleUpdateDTO;
@@ -17,7 +18,7 @@ public interface UserService {
 
     UserVO selectUser(Long id, Long userId, Integer role);
 
-    List<UserVO> selectList();
+    PageResult<?> selectList(Integer pageNum, Integer pageSize);
 
     void update(UserUpdateDTO dto, Long id, Long userId);
 

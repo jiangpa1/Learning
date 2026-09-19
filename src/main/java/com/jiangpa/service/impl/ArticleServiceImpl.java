@@ -11,6 +11,7 @@ import com.jiangpa.common.PageResult;
 import com.jiangpa.dto.ArticleDTO;
 import com.jiangpa.exception.BusinessException;
 import com.jiangpa.mapper.ArticleMapper;
+import com.jiangpa.mapper.CategoryMapper;
 import com.jiangpa.mapper.UserMapper;
 import com.jiangpa.pojo.Article;
 import com.jiangpa.pojo.User;
@@ -39,18 +40,21 @@ import java.util.stream.Collectors;
 @Slf4j
 public class ArticleServiceImpl implements ArticleService {
     private static final long DETAIL_TTL_SECONDS = 30 * 60;
-    private static final int  TTL_JITTER_SECONDS = 300;
-    private static final long NULL_TTL_MINUTES   = 2;
-    private static final long LOCK_TTL_SECONDS   = 10;
-    private static final int  MAX_RETRY          = 1;
-    private static final long RETRY_WAIT_MILLIS  = 100;
+    private static final int TTL_JITTER_SECONDS = 300;
+    private static final long NULL_TTL_MINUTES = 2;
+    private static final long LOCK_TTL_SECONDS = 10;
+    private static final int MAX_RETRY = 1;
+    private static final long RETRY_WAIT_MILLIS = 100;
 
     private final ArticleMapper articleMapper;
     private final UserMapper userMapper;
     private final StringRedisTemplate stringRedisTemplate;
     private final ObjectMapper objectMapper;
+    private final CategoryMapper categoryMapper;
 
-    /** 解锁脚本：只有 value 还是我的 token 才删，比对+删除在 Redis 内原子完成 */
+    /**
+     * 解锁脚本：只有 value 还是我的 token 才删，比对+删除在 Redis 内原子完成
+     */
     private static final DefaultRedisScript<Long> UNLOCK_SCRIPT = new DefaultRedisScript<>(
             "if redis.call('get', KEYS[1]) == ARGV[1] " +
                     "then " +
@@ -60,23 +64,24 @@ public class ArticleServiceImpl implements ArticleService {
                     "end",
             Long.class);
 
-    public ArticleServiceImpl(ArticleMapper articleMapper, UserMapper userMapper, StringRedisTemplate stringRedisTemplate, ObjectMapper objectMapper) {
+    public ArticleServiceImpl(ArticleMapper articleMapper, UserMapper userMapper, StringRedisTemplate stringRedisTemplate, ObjectMapper objectMapper, CategoryMapper categoryMapper) {
         this.articleMapper = articleMapper;
         this.userMapper = userMapper;
         this.stringRedisTemplate = stringRedisTemplate;
         this.objectMapper = objectMapper;
+        this.categoryMapper = categoryMapper;
     }
 
     @Override
-    public ArticleDetailVO selectArticleById(Long id){
+    public ArticleDetailVO selectArticleById(Long id) {
         return selectArticleById(id, 0);
     }
 
-    private ArticleDetailVO selectArticleById(Long id, int retryCount){
+    private ArticleDetailVO selectArticleById(Long id, int retryCount) {
         //引入redis后
         String cached = cacheGetDetail(id);
 
-        if(cached != null) {
+        if (cached != null) {
             if (CacheKeys.NULL_SENTINEL.equals(cached)) {
                 throw new BusinessException(404, "文章不存在！");
             }
@@ -112,15 +117,12 @@ public class ArticleServiceImpl implements ArticleService {
         pageSize = Math.min(pageSize, 50);
         Page<Article> page = new Page<>(pageNum, pageSize);
 
-
-
         LambdaQueryWrapper<Article> wrapper = new LambdaQueryWrapper<>();
         wrapper.select(Article::getId, Article::getTitle, Article::getSummary,
                         Article::getUserId, Article::getViewCount, Article::getCreateTime)
                 .orderByDesc(Article::getCreateTime);
 
         IPage<Article> result = articleMapper.selectPage(page, wrapper);
-
 
         List<Long> userIds = result.getRecords().stream()
                 .map(Article::getUserId)
@@ -157,6 +159,11 @@ public class ArticleServiceImpl implements ArticleService {
 
     @Override
     public Long addArticle(ArticleDTO articleDTO, Long userId) {
+        if (articleDTO.getCategoryId() != null
+                && categoryMapper.selectById(articleDTO.getCategoryId()) == null) {
+            throw new BusinessException(404, "该分类不存在");
+        }
+
         Article article = new Article();
         BeanUtils.copyProperties(articleDTO, article);
         article.setUserId(userId);
@@ -186,6 +193,11 @@ public class ArticleServiceImpl implements ArticleService {
 
         LambdaUpdateWrapper<Article> wrapper = new LambdaUpdateWrapper<>();
 
+        if (articleDTO.getCategoryId() != null
+                && categoryMapper.selectById(articleDTO.getCategoryId()) == null) {
+            throw new BusinessException(404, "该分类不存在");
+        }
+
         String summary = getSummary(articleDTO.getContent());
         wrapper.eq(Article::getId, id)
                 .set(Article::getTitle, articleDTO.getTitle())
@@ -214,7 +226,9 @@ public class ArticleServiceImpl implements ArticleService {
         cacheEvict(CacheKeys.articleDetail(id), CacheKeys.articleViews(id), CacheKeys.articleLock(id));
     }
 
-    /** 列表中文章摘要生成 */
+    /**
+     * 列表中文章摘要生成
+     */
     private String getSummary(String content) {
         String plain = content.trim().replaceAll("\\s+", " ");
         if (plain.length() <= 100) {
@@ -223,7 +237,9 @@ public class ArticleServiceImpl implements ArticleService {
         return plain.substring(0, 100) + "...";
     }
 
-    /** 查DB，回填缓存 */
+    /**
+     * 查DB，回填缓存
+     */
     private ArticleDetailVO fetchFromDbAndCache(Long id) {
         Article article = articleMapper.selectById(id);
         if (article == null) {
@@ -250,7 +266,9 @@ public class ArticleServiceImpl implements ArticleService {
         return articleDetailVO;
     }
 
-    /** 睡眠工具 */
+    /**
+     * 睡眠工具
+     */
     private void sleepQuietly(long millis) {
         try {
             Thread.sleep(millis);
@@ -260,7 +278,9 @@ public class ArticleServiceImpl implements ArticleService {
         }
     }
 
-    /** 读内容缓存。未命中或 Redis 异常都返回 null，调用方按未命中处理 */
+    /**
+     * 读内容缓存。未命中或 Redis 异常都返回 null，调用方按未命中处理
+     */
     private String cacheGetDetail(Long id) {
         String key = CacheKeys.articleDetail(id);
         try {
@@ -271,7 +291,9 @@ public class ArticleServiceImpl implements ArticleService {
         }
     }
 
-    /** 解析缓存的 JSON。失败时清掉坏数据并返回 null，让流程落到回源分支。 */
+    /**
+     * 解析缓存的 JSON。失败时清掉坏数据并返回 null，让流程落到回源分支。
+     */
     private ArticleDetailVO parseCachedDetail(String json, Long id) {
         try {
             return objectMapper.readValue(json, ArticleDetailVO.class);
@@ -282,8 +304,10 @@ public class ArticleServiceImpl implements ArticleService {
         }
     }
 
-    /** 回填内容缓存。失败不影响本次返回（数据已经从 DB 拿到了）。
-     *  注意：调用方需先把 viewCount 置 null，浏览量不进缓存内容。 */
+    /**
+     * 回填内容缓存。失败不影响本次返回（数据已经从 DB 拿到了）。
+     * 注意：调用方需先把 viewCount 置 null，浏览量不进缓存内容。
+     */
     private void cachePutDetail(Long id, ArticleDetailVO vo) {
         String key = CacheKeys.articleDetail(id);
         try {
@@ -295,7 +319,9 @@ public class ArticleServiceImpl implements ArticleService {
         }
     }
 
-    /** 写空值哨兵防穿透。失败只记日志，功能正常（只是防穿透暂时失效） */
+    /**
+     * 写空值哨兵防穿透。失败只记日志，功能正常（只是防穿透暂时失效）
+     */
     private void cacheMarkNotExist(Long id) {
         String key = CacheKeys.articleDetail(id);
         try {
@@ -306,7 +332,9 @@ public class ArticleServiceImpl implements ArticleService {
         }
     }
 
-    /** 清除若干缓存 key。失败只记日志（最坏情况是脏到 TTL 过期）。 */
+    /**
+     * 清除若干缓存 key。失败只记日志（最坏情况是脏到 TTL 过期）。
+     */
     private void cacheEvict(String... keys) {
         try {
             for (String key : keys) {
@@ -319,6 +347,7 @@ public class ArticleServiceImpl implements ArticleService {
 
     /**
      * 让浏览量 +1。
+     *
      * @param dbValue 数据库里的当前值：用于首次播种，以及 Redis 不可用时兜底
      * @return 自增后的值；Redis 不可用时返回 dbValue
      */
@@ -335,7 +364,9 @@ public class ArticleServiceImpl implements ArticleService {
         }
     }
 
-    /** 抢锁。抢到返回本次的唯一 token；已被占用或 Redis 异常都返回 null（调用方按"没抢到"处理）。 */
+    /**
+     * 抢锁。抢到返回本次的唯一 token；已被占用或 Redis 异常都返回 null（调用方按"没抢到"处理）。
+     */
     private String cacheTryLock(Long id) {
         String key = CacheKeys.articleLock(id);
         String token = UUID.randomUUID().toString();
@@ -349,7 +380,9 @@ public class ArticleServiceImpl implements ArticleService {
         }
     }
 
-    /** 释放锁。失败只记日志 —— 锁有 TTL，会自然过期。 */
+    /**
+     * 释放锁。失败只记日志 —— 锁有 TTL，会自然过期。
+     */
     private void cacheUnlock(Long id, String token) {
         String key = CacheKeys.articleLock(id);
         try {

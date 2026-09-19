@@ -32,8 +32,9 @@ public class UserController {
     @RateLimit(limit = 30, window = 1000*60)
     @RequireRole(1)
     @GetMapping("/list")
-    public Result<?> selectList(){
-        return Result.success(userService.selectList());
+    public Result<?> selectList(@RequestParam(defaultValue = "1") Integer pageNum,
+                                @RequestParam(defaultValue = "10") Integer pageSize){
+        return Result.success(userService.selectList(pageNum, pageSize));
     }
 
     //更新用户

@@ -3,7 +3,10 @@ package com.jiangpa.service.impl;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 
 
+import com.baomidou.mybatisplus.core.metadata.IPage;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.jiangpa.common.CacheKeys;
+import com.jiangpa.common.PageResult;
 import com.jiangpa.dto.UserLoginDTO;
 import com.jiangpa.dto.UserRegisterDTO;
 import com.jiangpa.dto.UserRoleUpdateDTO;
@@ -65,15 +68,12 @@ public class UserServiceImpl implements UserService {
         user.setNickname(dto.getNickname());
         user.setCreateTime(LocalDateTime.now());
         user.setUpdateTime(LocalDateTime.now());
+        user.setRole(0);
 
         userMapper.insert(user);
 
-        UserVO userVO = new UserVO();
-        BeanUtils.copyProperties(user, userVO);
-
-        return userVO;
+        return toUserVO(user);
     }
-
 
     @Override
     public UserVO selectUser(Long id, Long userId, Integer role) {
@@ -86,22 +86,29 @@ public class UserServiceImpl implements UserService {
             throw new BusinessException(403, "无权操作他人账号");
         }
 
-        UserVO userVO = new UserVO();
-        BeanUtils.copyProperties(user, userVO);
-
-        return userVO;
+        return toUserVO(user);
     }
 
     @Override
-    public List<UserVO> selectList() {
-        List<User> users = userMapper.selectList(null);
-        List<UserVO> userVOs = new ArrayList<>();
-        for (User user : users) {
-            UserVO userVO = new UserVO();
-            BeanUtils.copyProperties(user, userVO);
-            userVOs.add(userVO);
-        }
-        return userVOs;
+    public PageResult<?> selectList(Integer pageNum, Integer pageSize) {
+        pageSize = Math.min(pageSize, 50);
+        Page<User> page = new Page<>(pageNum, pageSize);
+
+        LambdaQueryWrapper<User> wrapper = new LambdaQueryWrapper<>();
+        wrapper.select(User::getId, User::getRole, User::getUsername, User::getNickname);
+
+        IPage<User> result = userMapper.selectPage(page, wrapper);
+
+        List<UserVO> voList = result.getRecords().stream().map(this::toUserVO).toList();
+
+        PageResult<UserVO> pageResult = new PageResult<>();
+        pageResult.setTotal(result.getTotal());
+        pageResult.setPageNum(result.getCurrent());
+        pageResult.setPageSize(result.getSize());
+        pageResult.setPages(result.getPages());
+        pageResult.setRecords(voList);
+
+        return pageResult;
     }
 
     @Override
@@ -176,5 +183,14 @@ public class UserServiceImpl implements UserService {
         } catch (Exception e) {
             log.warn("删除 refresh key 失败，不影响此次返回", e);
         }
+    }
+
+    /** User → UserVO（唯一映射出口）。
+     *  注意：入参可能是【部分字段】的 User（如列表查询只 select 了 4 列），
+     *  所以这里只拷 id/role/username/nickname，不要新增依赖其他字段的逻辑。 */
+    private UserVO toUserVO(User user) {
+        UserVO vo = new UserVO();
+        BeanUtils.copyProperties(user, vo);
+        return vo;
     }
 }
