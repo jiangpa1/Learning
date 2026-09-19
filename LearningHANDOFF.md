@@ -1,6 +1,6 @@
 # HANDOFF — Learning 项目交接说明
 
-> 最后更新：2026-09-18
+> 最后更新：2026-09-19
 > 项目路径：`C:\Users\ASUS\Desktop\Learning`
 > 项目仓库：`jiangpa1/Learning`（分支 `main`）
 > 笔记仓库：`jiangpa1/java-learning`（每日练习与知识库）
@@ -12,7 +12,7 @@
 
 一个 Java 后端学习项目，作者是计算机系大三学生，目标是 2026 年寒假（约 12 月—次年 1 月）找 Java 后端实习。
 
-形态上是一个**简易博客后端**：用户、认证、文章、分类、评论，文章详情带 Redis 缓存，另有逻辑删除、角色权限、接口限流三层横切能力。**共 20 个接口**（用户 5 + 认证 4 + 文章 5 + 分类 4 + 评论 3，其中 `PUT /user/role` 为 2026-09-18 新增）。
+形态上是一个**简易博客后端**：用户、认证、文章、分类、评论，文章详情带 Redis 缓存，另有逻辑删除、角色权限、接口限流三层横切能力，以及 **51 个单元测试**。**共 22 个接口**（认证 4 + 用户 6 + 文章 5 + 分类 4 + 评论 3）。
 
 需要说明的是，这**不是教学 demo**。接口分层、统一响应封装、JWT 双 Token 鉴权、角色权限、逻辑删除、接口限流、全局异常处理、分页、跨表查询、并发更新、缓存与缓存一致性、降级策略这些都是按真实项目的做法来的，代码里刻意避开了不少新手写法。接手或复看时，下面第七节的「关键设计决策」是最需要先读的部分——那些看起来"绕"的写法是为了解决具体问题，不要顺手改回简单版本。
 
@@ -186,11 +186,16 @@ JwtInterceptor（你是谁，fail-closed）
 
 ### 用户模块（`/user/**`）
 - `GET /user/{id}` 查询单个 —— **自己 或 管理员**
-- `GET /user/list` 用户列表（**不分页，待办**）—— **仅管理员**
-- `PUT /user/{id}` 修改昵称 —— **仅本人**（管理员也不能改别人）
+- `GET /user/list` 用户列表（**已分页**：`PageQueryDTO`，`pageSize` 上限 50，**越界返 400 而不是截断**）—— **仅管理员**
+- `PUT /user/nickname/{id}` 修改昵称 —— **仅本人**（管理员也不能改别人）
+- `PUT /user/password/{id}` **修改密码** —— **仅本人**；校验旧密码 + 新旧不能相同 + 两次一致，**改完删 refreshKey 强制下线**
 - `DELETE /user/{id}` 删除 —— **自己 或 管理员**
 - `PUT /user/role` **改角色**（`{id, role}`，role 0=降级/1=升级）—— **仅管理员**；含"不能降级最后一个管理员"守卫 + 改角色即作废旧凭证
-- 返回给前端的是 `UserVO`，**不含 password**
+- 返回给前端的是 `UserVO`（含 `role`），**不含 password**
+
+> **参数位置有三种风格**：`nickname` / `password` / `DELETE` 的 id 在**路径**；`role` 的 id 在**请求体**；
+> `list` 的参数在**查询字符串**。接口文档里有对照表。
+
 
 ### 文章模块（`/article/**`）
 - `GET /article/{id}` 详情，带作者昵称，**走 Redis 缓存**
@@ -489,26 +494,102 @@ if (Boolean.TRUE.equals(locked)) {
 
 > 想清楚互斥锁的**代价**：抢不到锁的请求要等待，增加了响应时间。所以工业界还有「逻辑过期」方案——不设 Redis TTL，把过期时间放进 value，发现逻辑过期就返回旧值 + 异步重建。两种方案要能对比着讲。
 
+### 15. 分页参数越界要**拒绝**，不要静默截断
+
+`GET` 的 query 参数用 **`@ModelAttribute` + `@Valid`** 绑定到 `PageQueryDTO`（**不是 `@RequestBody`** —— GET 请求没有请求体）：
+
+```java
+// Controller
+public Result<?> selectList(@Valid @ModelAttribute PageQueryDTO pageQueryDTO)
+
+// PageQueryDTO
+@Min(value = 1, message = "从第一页开始访问")        private Integer pageNum = 1;
+@Min(value = 1, ...) @Max(value = 50, ...)          private Integer pageSize = 10;
+```
+
+**行为**：`?pageSize=999` → **400**（不是按 50 返回 200）。
+
+| 方案 | 行为 | 取舍 |
+| --- | --- | --- |
+| **拒绝**（本项目） | 400 + 明确提示 | 调用方立刻发现参数写错；代价是前端必须自己限住 |
+| 静默截断（早期） | 按 50 返回 200 | 宽容；代价是调用方**不知道自己被截了**，可能误以为只有 50 条数据 |
+
+**为什么改**：把错误暴露给调用方，比悄悄改变语义更安全。
+
+> **⚠️ 这里藏着一个非常容易踩的坑**：`@RequestBody` 校验失败抛 `MethodArgumentNotValidException`，
+> 而 **`@ModelAttribute` 校验失败抛的是 `BindException`**（前者是后者的子类）。
+> 全局异常处理器里**两个都要有**，少一个就会掉到兜底返 **500** ——
+> 表现为"服务器开小差了"，看起来像服务端故障，实际是客户端参数不合法。
+
+### 16. 跨模块删除一律**不级联**（明确的取舍，不是遗漏）
+
+数据库不建物理外键，所以"删除的连带影响"**只能靠应用层决定**，就必须显式约定：
+
+| 关系 | 决策 | 行为 |
+| --- | --- | --- |
+| 用户 → 文章 / 评论 | **不级联** | 用户逻辑删除后，他的文章仍在、列表照常返回；只是查不到作者 → 昵称兜底成 `"未知作者"` |
+| 文章 → 评论 | **不级联** | 文章逻辑删除后，它的评论仍是 `deleted = 0` 留在表里；访问 `/comment/list?articleId={已删文章}` 返 **404**（列表接口先校验文章存在） |
+| 分类 → 文章 | **拒绝删除** | 分类下有**有效文章**时不允许删分类，返回具体篇数 |
+
+**为什么不级联**：这是**回收站思路** —— 误删时可以恢复（直接改 `deleted` 字段），一旦级联就不可逆。
+**代价**：数据会堆积，且"评论查不到但实际存在"对排查者不直观。
+
+### 17. 改密码 / 改角色后必须**删 refreshKey** 强制下线
+
+凭证有两层，失效行为不同：
+
+| 凭证 | 处置 | 效果 |
+| --- | --- | --- |
+| **refreshToken** | 删 `learning:token:refresh:{userId}` | ✅ **立即失效**，无法续期 |
+| **accessToken** | 无状态，改不了 | ⚠️ 剩余有效期（≤30 分钟）内**仍可用** |
+
+**这解决了一个真实缺陷**：role 写在 JWT claim 里，而 `refresh` 是**从旧 token 的 claims 取 role**
+再签发新 token —— 所以只要旧 refreshToken 还能用，**旧角色就会被无限续期**，"降级"等于没降
+（实测过：修复前降级普通用户后，用降级前的 refreshToken 仍能换出带旧 role 的新 token）。
+
+**已知残留代价**：access 的 ≤30 分钟窗口是"无状态"的固有代价。
+想立即失效需要引入"改密/改角色时间戳 + 拦截器比对 token 的 `iat`"。
+
+### 18. 首任管理员必须**手工指定**，且允许自降
+
+- 注册接口**硬编码 `role = 0`**（fail-safe：忘了赋值的后果是"权限不足"而不是"人人都是管理员"）
+- 所以第一个管理员只能手工 `UPDATE tb_user SET role = 1 WHERE username = 'xxx'`，
+  **不做这一步，加完 role 后 `GET /user/list` 会返 403（包括你自己）**
+- `PUT /user/role` **允许管理员降级自己**，由"**不能降级最后一个管理员**"的守卫兜住
+  （守卫判断"除目标之外还有没有管理员"，用 `.ne(User::getId, id)` 排除目标自己）
+
+
 ---
 
 ## 八、待办清单
 
-**2026-09-18 复核**：原清单里「修缓存击穿三缺陷」「逻辑删除」**已完成**，已从表中移除。
+**2026-09-19 复核**：原清单里「用户列表分页」「请求体解析异常」「文章分类校验」「改密码接口」「分页参数抽公共组件」「单元测试」**六项已完成**，已从下方表中移除（明细见本节末尾）。
+
+### 仍然待办
 
 | 优先级 | 事项 | 说明 |
 | --- | --- | --- |
-| 中 | 用户模块列表加分页 | 现在是全表查（`selectList` 无分页），参照文章模块的 `PageResult` 写 |
-| 中 | `HttpMessageNotReadableException` 单独处理 | JSON 格式写错、Content-Type 不对时，现在会掉到兜底返回 500，其实应该返 400。同理 `HttpMediaTypeNotSupportedException` 也未单独处理 |
-| 中 | 文章关联分类的校验 | `POST/PUT /article` 的 `categoryId` 可以存但不校验分类是否存在，会产生悬空引用 |
-| 中 | 分类的删除语义 | 分类是**全站资产**，已限制为"仅管理员"；但"删除分类"和"删除分类下文章"的级联关系没定义，目前是"有文章就拒绝删" |
-| 中 | 逻辑删除的评论级联 | 文章逻辑删除后，它的评论仍在表里（接口因文章 404 而查不到）。**当前选择不级联**，需要产品上确认 |
-| 低 | 列表页浏览量不一致 | `selectArticlesList` 从 DB 读 `view_count`，而 DB 每 30 分钟才回写 → 列表与详情会不一致。要么接受，要么列表也从 Redis 取 |
-| 低 | 改密码接口 | `UserUpdateDTO` 只能改昵称。**注意**：改密码后必须显式删该用户的 refresh key 强制下线（参考 `updateRole` 的做法） |
-| 低 | `PUT /user/{id}/role` 不能改自己 | 当前允许管理员降级自己（有"最后一个管理员"守卫兜住）。如果产品上要禁止，加一条 `id != userId` 校验 |
-| 低 | 分页参数抽公共组件 | 每个列表接口都在重复写 `pageNum`/`pageSize` + 上限截断 |
+| 中 | `md/分类与评论模块接口文档.md` 补"评论不级联"的约定 | 目前这条决策只写在 `用户模块接口文档.md` 第九节，分类/评论那份文档里没有 |
+| 低 | 列表页浏览量不一致 | `selectArticlesList` 从 DB 读 `view_count`，而 DB 每 30 分钟才回写 → 列表与详情会不一致。**已决定接受这个滞后**（写进 `Redis缓存设计文档.md` 即可） |
 | 低 | 提示语统一 | 见第九节 |
-| 低 | 限流阈值调优 | 当前值都是文档 7.2 的**演示值**，非流量观测值 |
-| 低 | 单元测试 | 目前全部靠接口实测（HANDOFF 第十一节），没有 JUnit 测试。简历上"有单测"是加分项 |
+| 低 | 限流阈值调优 | 当前值都是文档 7.2 的**演示值**，非流量观测值。**已在文档标注**，不打算改 |
+| 低 | 逻辑删除的评论级联 | **已决定不级联**（见第七节第 16 条），无需开发，只需在文档中保持描述一致 |
+
+### 2026-09-19 完成明细
+
+| 事项 | 落点 |
+| --- | --- |
+| 用户列表分页 | `GET /user/list` 改 `PageResult`，`wrapper.select` 只查轻量列 |
+| 请求体解析异常处理 | `GlobalExceptionHandler` 补 `HttpMessageNotReadableException` / `HttpMediaTypeNotSupportedException` → 400 |
+| 文章分类关联校验 | `categoryId` **非 null 时**才校验存在性（分类是可选的，与 `category_id` 允许 NULL 一致）；用 `selectById` 校验，受 `@TableLogic` 影响 → 指向已删除分类也会被拒 |
+| **改密码接口** | `PUT /user/password/{id}`：校验旧密码 → 四个拒绝分支 → 落库 → **删 refreshKey 强制下线**（见第七节第 17 条） |
+| **分页参数抽公共组件** | `PageQueryDTO`（`@Min`/`@Max`）+ 三个 Controller 统一 `@Valid @ModelAttribute`；`PageResult<?>` 通配符改成具体泛型 |
+| **单元测试** | 4 个测试类 **51 个用例**（`JwtUtilsTest` 13 / `CacheKeysTest` 9 / `TokenServiceImplTest` 17 / `RateLimitInterceptorTest` 12），重点锁住**降级方向**与已修缺陷 |
+| 昵称/密码接口拆分 | `UserUpdateDTO` → `UpdateNicknameDTO`，路径改为 `PUT /user/nickname/{id}`（昵称和密码的校验规则完全不同，混一个 DTO 会让改昵称也被要求传旧密码） |
+| 三类参数异常处理 | 补 `BindException`（`@ModelAttribute` 校验失败）、`MissingServletRequestParameterException`、`MethodArgumentTypeMismatchException` → 全部 400（**少了会返 500**，见第七节第 15 条的坑） |
+| 接口文档重写 | `md/用户模块接口文档.md` 按实际实现重写（10 个接口 + 8 个状态码 + 越权机制 + 跨模块行为约定） |
+| `GlobalExceptionHandler` 注释 | 每个 handler 加 Javadoc：触发场景、返回码、和相邻 handler 的区别 |
+
 
 ---
 
@@ -630,9 +711,27 @@ if (Boolean.TRUE.equals(locked)) {
 
 ---
 
-## 十三、本轮（2026-09-18）的验证足迹
+## 十三、验证足迹
 
-**没有单元测试**，全部靠**接口实测 + 数据库/Redis 对账**。当天的回归脚本在 `C:\Users\ASUS\Desktop\java`（**含数据库口令，切勿提交**）：
+### 13.1 单元测试（2026-09-19 起）
+
+**51 个用例，JUnit 5 + Mockito**，纯单元测试（不启动 Spring 容器、不连数据库和 Redis）：
+
+| 测试类 | 用例 | 锁住什么 |
+| --- | --- | --- |
+| `JwtUtilsTest` | 13 | `type` 双向校验；**role 必须用 `Number.class` 取**（用 `String.class` 必抛 `JwtException` —— 把"全站 401"的根因钉成断言）；过期/篡改/换密钥必须验签失败；**同一秒签发两个 token 必须不同**（jti） |
+| `CacheKeysTest` | 9 | **uri 必须参与限流 key 拼接**（否则 `/article/1` 与 `/article/2` 共用计数器）；key 格式无双冒号、全部带 `learning:` 前缀 |
+| `TokenServiceImplTest` | 17 | **四张降级表**：issue/refresh/isRevoked 的 Redis 失败 → 503；logout 删 key → fail-open、写黑名单 → 503；过期 refreshToken → **401 而非 500** |
+| `RateLimitInterceptorTest` | 12 | Redis 挂/脚本返空 → **fail-open 放行且不 NPE**；**userId 为 null 时（登录注册走这条路）不 NPE**；超限返 **429 而非 401**；key 按 userId/IP 分维度 |
+
+**为什么优先测这些**：**降级方向靠接口测试极难复现**（要停 Redis、改端口、重启），而权限与降级逻辑**写错了大部分用例还是绿的** —— 只有把"该放行的"也写成断言才拦得住。
+
+> **跑法**：IDEA 里右键 `src/test/java` → Run Tests。项目**没有 Maven wrapper**（`mvn` 不在 PATH），所以命令行跑需要自己拼 classpath；
+> `day43/TestRunner.java.bak` 是为此写的一个 JUnit Platform 运行器（**需要额外加 `junit-platform-launcher` 依赖**，`spring-boot-starter-test` 不传递它，所以在 IDEA 里直接编译会报"程序包不存在"）。
+
+### 13.2 接口实测回归脚本
+
+在 `C:\Users\ASUS\Desktop\java`（**数据库口令已改为读环境变量 `LEARNING_DB_PASS`，不再硬编码**）：
 
 | 脚本 | 覆盖 |
 | --- | --- |
@@ -644,16 +743,35 @@ if (Boolean.TRUE.equals(locked)) {
 | `day42-ratelimit-order.ps1` | 拦截器顺序（403 不消耗额度） |
 | `day42-degraded-test.ps1` | 六处 Redis 依赖的降级方向（把 port 改 9999） |
 | `day42-final-regression.ps1` | 19 条全功能回归 |
+| `day43-pagination-verify.ps1` | 分页参数（拒绝而非截断）+ 三类参数异常 → 400（18 条） |
 
 > **一个值得复用的验证方法**：用**自签 JWT**（从用户作用域取 `JWT_SECRET`，手工拼 header/payload + HMAC-SHA256）来构造"**已过期但签名合法**"或"角色不同"的 token。这样能把"过期分支"和"签名错误分支"彻底分开测，比只发垃圾串有价值得多。
 
 ---
 
-## 十四、下一步（2026-09-19 起）
+## 十四、下一步（2026-09-20 起）
 
-1. **更新本文档的已知不一致**（第十二节第 2 条那个 `逻辑删除设计文档.md`）
-2. 补计算机网络：**HTTP/HTTPS**（TCP 已于 9.16 学完，往应用层走）
-3. 待办清单里的「中」优先级三项：用户列表分页、`HttpMessageNotReadableException`、文章分类校验
-4. 10 月底前完成第二个项目或继续完善本项目（**单元测试 + Docker 部署**是简历加分项）
-5. 11 月启动简历 + JavaGuide 八股文系统刷题
+**2026-09-19 已完成**：HTTP/HTTPS 笔记 + 知识库 4 条；改密码接口；分页组件化；三类参数异常处理；51 个单元测试。
+所以原来的第 2、3 项已完成，本节重排。
+
+### 项目侧（按建议顺序）
+
+1. **接口文档一致性收尾**（半天）
+   - `md/分类与评论模块接口文档.md` 补"评论不级联"的约定（这条现在只在用户模块文档里）
+   - `md/文章模块接口文档.md` 的表名是早期稿（无 `tb_` 前缀），需要改正
+   - 各文档顶部的 MyBatis-Plus 版本号统一（项目实际 3.5.5，早期文档写 3.4.3）
+   - 逻辑删除文档里那句与实测不符的验收条目（第十二节第 2 条已记录，改完即可删掉那条备注）
+2. **Docker 部署**（1 天）—— 简历差异点：Dockerfile + `docker-compose` 起 MySQL/Redis/应用，同时把"`JWT_SECRET` 怎么传进容器"讲清楚
+3. **继续铺单元测试**（重点补 `UserServiceImpl` 的权限判断、`ArticleServiceImpl` 的缓存降级）
+   —— 权限逻辑是**最该有测试的地方**，因为 `!A || !B` 写反时大部分用例还是绿的
+4. 低优先（可做可不做）：统一提示语、魔法数字提取常量、`PageResult` 死代码构造器
+
+### 知识侧
+
+5. **计算机网络收口**：把「从输入 URL 到页面展示」串成一条链路（DNS → TCP → TLS → HTTP → 渲染）
+   —— 这一题能把 9.16～9.19 学的全串起来，是面试的综合题
+6. **操作系统**（学习路线第二阶段还剩这块：进程/线程、内存管理、IO 模型）
+7. 11 月启动简历 + JavaGuide 八股文系统刷题；12 月海投
+8. 10 月底前决定第二个项目（当前只有 Learning 一个主力项目）
+
 
