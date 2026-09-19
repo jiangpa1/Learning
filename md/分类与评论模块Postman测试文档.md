@@ -1,7 +1,7 @@
 # 分类与评论模块 Postman 测试文档
 
 > 项目：Learning（Spring Boot 2.7.18 + MyBatis-Plus 3.5.5）
-> Base URL：`http://localhost:8080`
+> Base URL：`http://localhost:8081`
 > 前置：`tb_category`、`tb_comment` 表已建好，应用**已启动**
 > 编写日期：2026-09-15
 
@@ -33,7 +33,7 @@
 
 | 变量名 | 初始值 | 用途 |
 | --- | --- | --- |
-| `baseUrl` | `http://localhost:8080` | |
+| `baseUrl` | `http://localhost:8081` | |
 | `token` | 留空 | 存账号 A 的 token |
 | `tokenB` | 留空 | 存账号 B 的 token（**删别人评论必须用它**） |
 

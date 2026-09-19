@@ -5,6 +5,8 @@
 > 项目仓库：`jiangpa1/Learning`（分支 `main`）
 > 笔记仓库：`jiangpa1/java-learning`（每日练习与知识库）
 > 文档目录：`md/`
+>
+> **2026-09-19 第二轮**：完成「文档一致性收尾」（四表 DDL 按库对齐、逻辑删除验收项改正、列表页滞后落文档），并新增 `README.md`。详见第八节末尾。
 
 ---
 
@@ -35,8 +37,9 @@
 | spring-security-crypto | 由 Spring Boot 管理 | **只引 crypto，没引完整 starter** |
 | Lombok | 1.18.30 | provided |
 | spring-boot-starter-validation | | 参数校验 |
+| **Knife4j** | 4.5.0 | 接口文档 UI，访问 `/doc.html`；底层是 **springdoc-openapi-ui 1.7.0**（**不是 springfox**）。坐标必须用 `knife4j-openapi3-spring-boot-starter` —— 带 `jakarta` 的那个是给 Spring Boot 3 的 |
 
-端口：`8080`
+端口：`8081`（**2026-09-19 从 8080 改的**；`md/` 下各文档的 Base URL 与两份 Postman 文档已同步为 8081）
 
 > ⚠️ **这台虚拟机是多个项目共用的**（上面还有海南麻将的库）。所以 Redis 的 key 一律带 `learning:` 前缀，避免撞 key。
 
@@ -159,6 +162,23 @@ JwtInterceptor（你是谁，fail-closed）
 
 **顺序的三个理由**：① 拿不到 `userId` 就只能按 IP 限流；② 拿不到 `role` 无法按角色设阈值；③ **没权限的请求不该消耗限流额度**（否则攻击者能用"注定 403 的请求"耗掉目标用户/IP 的额度，变成廉价的 DoS 放大器）。
 
+**放行名单**（`WebMvcConfig`，2026-09-19 因接入接口文档而扩充）：
+
+| 拦截器 | `excludePathPatterns` |
+| --- | --- |
+| `JwtInterceptor` | `/auth/**`、`/error`、**文档路径** |
+| `AuthorizationInterceptor` | `/auth/**`、`/error`、**文档路径** |
+| `RateLimitInterceptor` | 只有 `/error` —— **不需要放行文档路径** |
+
+三条放行各自的理由：
+
+- `/auth/**` 不放行 = 拿 token 的接口要求先带 token，**死锁**，永远登不进去
+- `/error` 不放行 = 出错时 Spring Boot 内部转发到 `/error` 又被拦一次，**真实错误被 401 盖住**
+- **文档路径不放行 = 打开 `/doc.html` 只会得到一段 401 的 JSON**（2026-09-19 实测确认过这个现象）
+
+文档路径常量 `DOC_PATHS`（定义在 `WebMvcConfig`）：`/doc.html`、`/webjars/**`、`/v3/api-docs/**`、`/swagger-ui/**`、`/swagger-ui.html`。
+**以后再加任何接口文档 / 框架自动注册的 handler，记得一并加进这个数组** —— 这是唯一会漏出放行名单的一类路径。
+
 **分层铁律**（改代码时别破坏）：
 
 - **Controller** 只做三件事：接参数、调 Service、用 `Result.success(...)` 包装。不写业务逻辑。
@@ -259,6 +279,34 @@ JwtInterceptor（你是谁，fail-closed）
 
 ### 基础设施
 - 三个拦截器（见第四节的顺序约定）
+- **接口文档（Knife4j，2026-09-19 接入）**：`http://localhost:8081/doc.html` —— 由 controller 签名**自动生成**，22 个接口按模块分组、可在线调试。调试受保护接口的步骤：先调 `/auth/login` 拿 accessToken → 在**左侧菜单**的 **Authorize** 里填入
+  - ⚠️ **每个 Controller 都必须加 `@SecurityRequirement(name = Knife4jConfig.SECURITY_SCHEME_NAME)`** —— **这是最关键的一条**：
+    **Knife4j 只读「接口级」的 `security` 字段**（源码 `readApiSecurityOAS3` 判的是 `operation.hasOwnProperty("security")`），
+    **它不会把根级的全局要求下发给各接口**。所以只配根级时，Knife4j 的 `securityKeys` 始终是 null →
+    门禁 `t.api.securityFlag && securityKeys.includes(e.key)` 失败 → **请求里一根 `Authorization` 头都不加**，
+    而 `JwtInterceptor` 返回的是**「未登录，请先登录」**（和"完全没带头"同一句话，极易误判成"没重启"）。
+    ⚠️ **以后新增 Controller 一定要记得加这个注解**
+  - ⚠️ `Knife4jConfig` 里的 `addSecurityItem(...)`（根级要求）**也要留着** —— 它负责让 **Swagger UI**（`/swagger-ui/index.html`）
+    能挂上 token，并在文档层面声明鉴权。**但光有它 Knife4j 不生效** —— 两者分工不同，缺一不可
+  - ⚠️ **Authorize 在 Knife4j UI 的左侧导航菜单里，不在右上角**（它是被当成一个菜单项 push 进导航列表的）
+  - ⚠️ **scheme 的 key 必须就叫 `Authorization`** —— 这是第二个坑，和上一条症状完全相同：
+    `type: http, scheme: bearer` 按 OpenAPI 规范**不带 `name` 字段**，springdoc 会把它丢掉，
+    而 Knife4j 解析到 name 为空时会**拿 scheme 的 key 当请求头名字**兜底
+    （源码 `strBlank(i.name) && (c.name=r, c.in="header")`，`r` 就是 key）。
+    key 要是叫 `bearerAuth`，请求头会发成 **`bearerAuth: Bearer xxx`**，
+    `JwtInterceptor` 找不到 `Authorization` → 返回**「未登录，请先登录」**。
+    把 key 直接命名成 `Authorization`，兜底就拼对了，**同时保留 `Bearer ` 自动补全**
+  - **排查口诀（三个 401 文案分别对应不同阶段，别混）**：
+    | 响应 message | 含义 |
+    | --- | --- |
+    | `未登录，请先登录` | **压根没收到 `Authorization` 头** —— 头名错、根本没发、或**接口没声明 `security`（Knife4j 就不会加头）** |
+    | `token 格式错误` | 收到头了，但缺 `Bearer ` 前缀（`JwtInterceptor` 第 55-59 行） |
+    | `token 无效` | 头名和前缀都对，才轮到验签失败（篡改/换密钥） |
+    | `登录已过期，请重新登录` | 签名合法，只是过期 |
+    | `登录已失效，请重新登录` | 命中黑名单（已登出） |
+  - 2026-09-19 实测对照：同一个假 token 只换头名 —— `bearerAuth:` → 「未登录，请先登录」；`Authorization:` → 「token 无效」
+  - ⚠️ `@Operation(security = {})` 在 **springdoc 1.7.0 上无效**（不会输出 `security:[]`），所以 `/auth/**` 也会显示要求鉴权 —— **无害**：`/auth/**` 在放行名单里，且 `logout` 本来就需要这个头
+  - Knife4j 拼 `Bearer ` 是**幂等**的（有无前缀都行）；但 **`/swagger-ui/index.html` 是无条件拼**，在那里必须只粘 token
 - `GlobalExceptionHandler` 统一处理参数校验、唯一键冲突、业务异常、兜底异常
 - `MybatisPlusConfig` 分页插件
 - `Result` 支持 200 / 400 / 401 / 403 / 404 / 429 / 500（`overLimit` 为限流专用）
@@ -567,13 +615,15 @@ public Result<?> selectList(@Valid @ModelAttribute PageQueryDTO pageQueryDTO)
 
 ### 仍然待办
 
+> **2026-09-19 第二轮复核**：原「接口文档一致性收尾」整项**已完成**（明细见本节末尾），「列表页浏览量」「评论不级联」也已落文档。下面只剩两条真正要动手的。
+
 | 优先级 | 事项 | 说明 |
 | --- | --- | --- |
-| 中 | `md/分类与评论模块接口文档.md` 补"评论不级联"的约定 | 目前这条决策只写在 `用户模块接口文档.md` 第九节，分类/评论那份文档里没有 |
-| 低 | 列表页浏览量不一致 | `selectArticlesList` 从 DB 读 `view_count`，而 DB 每 30 分钟才回写 → 列表与详情会不一致。**已决定接受这个滞后**（写进 `Redis缓存设计文档.md` 即可） |
-| 低 | 提示语统一 | 见第九节 |
-| 低 | 限流阈值调优 | 当前值都是文档 7.2 的**演示值**，非流量观测值。**已在文档标注**，不打算改 |
-| 低 | 逻辑删除的评论级联 | **已决定不级联**（见第七节第 16 条），无需开发，只需在文档中保持描述一致 |
+| **中** | **Docker 部署** | 简历差异点。仓库里目前**没有任何 Dockerfile / docker-compose / CI 文件**，确认未动工。见第十四节第 2 条 |
+| **中** | **继续铺单元测试** | 优先 `UserServiceImpl` 的权限判断、`ArticleServiceImpl` 的缓存降级。见第十四节第 3 条 |
+| 低 | 提示语统一 | 见第九节（**昵称兜底文案现有 4 处不一致**） |
+| 低 | `JwtProperties` 写法 | 仍是 `@Component` + `@ConfigurationProperties`，未用 `@EnableConfigurationProperties`（能用，只是不够现代） |
+| — | 限流阈值调优 | 当前值都是文档 7.2 的**演示值**，非流量观测值。**已在文档标注，不打算改** |
 
 ### 2026-09-19 完成明细
 
@@ -591,6 +641,19 @@ public Result<?> selectList(@Valid @ModelAttribute PageQueryDTO pageQueryDTO)
 | `GlobalExceptionHandler` 注释 | 每个 handler 加 Javadoc：触发场景、返回码、和相邻 handler 的区别 |
 
 
+### 2026-09-19 文档一致性收尾（同日第二轮）
+
+| 事项 | 落点 |
+| --- | --- |
+| **四张表 DDL 按库对齐** | `md/文章模块接口文档.md` 第二节：表名全部加 **`tb_` 前缀**（原来是无前缀的设计稿）；用 `SHOW CREATE TABLE` 补上四表的 `deleted` 列、`tb_user` 的 `role` / `avatar`、评论表改**复合索引** `idx_article_create`（并记下 `DROP INDEX idx_article_id`） |
+| 分类/评论文档 DDL 同步 | `md/分类与评论模块接口文档.md` 第二节：同样补 `deleted` + 复合索引；**删掉已失效的"命名提醒"**；「数据现状」快照按 SQL 重新核对 |
+| 逻辑删除验收项改正 | `md/逻辑删除设计文档.md` 6.1 第⑤条正文由"仍返 200"改为 **404**（10.1 保留"预判与实测不符"的记录作为素材） |
+| 列表页滞后落文档 | `md/Redis缓存设计文档.md` 新增 **2.4「已接受的代价：列表页的浏览量会滞后」** |
+| **新增 `README.md`** | 仓库根目录：22 接口清单、技术亮点、项目结构、快速开始（`JWT_SECRET` + `application-local.yml` 重建步骤）、文档索引、测试说明、已知取舍 |
+
+> 这一轮**没有改任何 Java 代码和数据库结构**，只是让文档与实现一致；同时复核出第九节里两条"小瑕疵"其实已经修掉了（见下）。
+
+
 ---
 
 ## 九、已知的小瑕疵
@@ -599,18 +662,18 @@ public Result<?> selectList(@Valid @ModelAttribute PageQueryDTO pageQueryDTO)
 
 - 文章不存在：详情接口抛 `"文章不存在！"`（全角感叹号），修改和删除抛 `"文章不存在"`（无标点）
 - 用户名已存在：Service 里查重抛 `"用户名已存在!"`（半角）
-- **作者昵称兜底文案有三处不同**：`ArticleServiceImpl` 的 `toMap` 里是 `"默认昵称"`、`getOrDefault` 里是 `"未知作者"`；`CommentServiceImpl` 里是 `"未知"`。建议统一成两个语义清晰的常量：**用户存在但昵称为空** → 一个文案；**用户查不到（脏数据）** → 另一个文案。
+- **作者昵称兜底文案有四处不统一**：`ArticleServiceImpl` 的 `toMap`（136 行）是 `"默认昵称"`、`getOrDefault`（144 行）是 `"未知作者"`；`CommentServiceImpl` 的 `toMap`（78 行）是 `"默认昵称"`、`getOrDefault`（86 行）是 `"未知"`。建议统一成两个语义清晰的常量：**用户存在但昵称为空** → 一个文案；**用户查不到（脏数据）** → 另一个文案。
 - `PUT /user/role` 校验失败时文案是 `"权限值只能是 0(降级) 或 1(升级)"` —— 这条已统一，可作为其他文案改写的参考
 
 > ~~唯一键冲突兜底返回"数据已存在！"~~ —— **已改为 `"数据不可复用！"`**（2026-09-18，配合逻辑删除：同一个处理器要服务 user 和 category 两张表，文案不能偏向任何一方）。
 
-**`PageResult` 有个没用的五参数构造器。** 全程用的是 setter，这个构造器是死代码，而且三个连续的 `Long` 参数很容易传错顺序还不会编译报错，建议删掉。
+**~~`PageResult` 有个没用的五参数构造器。~~** —— **已删除**（2026-09-19 复核：类里现在只有 `@Data` + 5 个字段，没有显式构造器）。
 
 **JwtProperties 用 `@Component` + `@ConfigurationProperties` 绑定。** 能用，但更现代的写法是 `@EnableConfigurationProperties` 或 `@ConfigurationPropertiesScan`。
 
 **~~`selectArticleById` 里保留了大段注释掉的旧实现。~~** —— **已删除**（2026-09-18）。
 
-**魔法数字散落。** 空值哨兵的 TTL（2 分钟）、锁的过期时间（10 秒）、detail 的 TTL 基数（30 分钟）都直接写在方法里，建议提到 `CacheKeys` 或常量类里。
+**~~魔法数字散落。~~** —— **已提取常量**（2026-09-19 复核：`ArticleServiceImpl` 顶部已有 `DETAIL_TTL_SECONDS` / `TTL_JITTER_SECONDS` / `NULL_TTL_MINUTES` / `LOCK_TTL_SECONDS` / `RETRY_WAIT_MILLIS` 五个常量）。
 
 **`RateLimitInterceptor` 的两处小瑕疵**：`getMethodAnnotation` 取了两次（第二次的判空是死代码）；`X-RateLimit-*` 头现在正常响应和超限响应都带（已修），但 `Retry-After` 在成功响应里也返回了"距窗口重置还有多久"，语义上略微奇怪（无害）。
 
@@ -700,14 +763,14 @@ public Result<?> selectList(@Valid @ModelAttribute PageQueryDTO pageQueryDTO)
 | **`角色权限设计文档.md`** | role 字段、`@RequireRole` + 授权拦截器、**水平/纵向越权区分**、权限矩阵；第十三节是「实现记录」（4 个测试才暴露的缺陷） |
 | **`接口限流设计文档.md`** | 四种限流算法对比、滑动窗口 + Lua、拦截器顺序、**六处 Redis 依赖的降级实测表**；第十四节是「实现记录」 |
 
-本文件 `LearningHANDOFF.md` 留在**仓库根目录**。
+本文件 `LearningHANDOFF.md` 和 **`README.md`** 都留在**仓库根目录** —— README 面向访客/面试官（项目介绍 + 快速开始），本文件面向接手继续开发的人（设计决策 + 踩坑 + 待办）。
 
 > **文档约定（2026-09-18 起）**：每份设计文档末尾都有「实现记录」一节，**先写设计 → 实现 → 把实测结果和踩坑回填**。回填后这份文档才够格当面试素材（`角色权限设计文档.md` 第十三节、`接口限流设计文档.md` 第十四节是范本）。
 >
-> **已知的文档不一致**：
-> 1. `文章模块接口文档.md` 里的表名写的是 `category` / `comment`（无 `tb_` 前缀），与实际库中的 `tb_category` / `tb_comment` 不符，那份文档是早期设计稿，未回改。
-> 2. `逻辑删除设计文档.md` 6.1 第⑤条写"再次删除同一个 id → 仍返 200"，**实测是 404**（Service 第一行 `selectById` 判存在，MP 自动过滤 `deleted=0`，走不到那条 UPDATE）。**404 更对，应该改文档而不是改代码。**
-> 3. 「用户模块的修改接口是 `PUT /user`（id 在 body 里）」，跟文章模块的 `PUT /article/{id}`（id 在路径里）风格不一致。角色接口 `PUT /user/role` 沿用了 body 风格（两个字段一起校验），保持一致即可。
+> **已知的文档不一致**（2026-09-19 第二轮清掉了前两条）：
+> 1. ~~`文章模块接口文档.md` 里的表名写的是 `category` / `comment`（无 `tb_` 前缀）~~ → **已改**：四张表统一 `tb_` 前缀，DDL 已用 `SHOW CREATE TABLE` 与库对齐。
+> 2. ~~`逻辑删除设计文档.md` 6.1 第⑤条写"再次删除同一个 id → 仍返 200"~~ → **已改**为 404（404 更对，改文档不改代码）。
+> 3. **仍然存在（不打算改）**：「用户模块的修改接口是 `PUT /user`（id 在 body 里）」跟文章模块 `PUT /article/{id}`（id 在路径里）风格不一致。角色接口 `PUT /user/role` 沿用了 body 风格（两个字段一起校验），保持一致即可。
 
 ---
 
@@ -756,15 +819,14 @@ public Result<?> selectList(@Valid @ModelAttribute PageQueryDTO pageQueryDTO)
 
 ### 项目侧（按建议顺序）
 
-1. **接口文档一致性收尾**（半天）
-   - `md/分类与评论模块接口文档.md` 补"评论不级联"的约定（这条现在只在用户模块文档里）
-   - `md/文章模块接口文档.md` 的表名是早期稿（无 `tb_` 前缀），需要改正
-   - 各文档顶部的 MyBatis-Plus 版本号统一（项目实际 3.5.5，早期文档写 3.4.3）
-   - 逻辑删除文档里那句与实测不符的验收条目（第十二节第 2 条已记录，改完即可删掉那条备注）
-2. **Docker 部署**（1 天）—— 简历差异点：Dockerfile + `docker-compose` 起 MySQL/Redis/应用，同时把"`JWT_SECRET` 怎么传进容器"讲清楚
+> **2026-09-19 第二轮**：原第 1 项「接口文档一致性收尾」**已完成**；原第 4 项里的「魔法数字提取常量」「`PageResult` 死代码构造器」复核时发现**也已完成**。故重排如下。
+
+1. ~~接口文档一致性收尾~~ —— **已完成**（第二轮，见第八节末尾），顺手补了 `README.md`
+2. **Docker 部署**（1 天）—— 简历差异点：Dockerfile + `docker-compose` 起 MySQL/Redis/应用，同时把"`JWT_SECRET` 怎么传进容器、`application-local.yml` 怎么不烤进镜像"讲清楚
 3. **继续铺单元测试**（重点补 `UserServiceImpl` 的权限判断、`ArticleServiceImpl` 的缓存降级）
    —— 权限逻辑是**最该有测试的地方**，因为 `!A || !B` 写反时大部分用例还是绿的
-4. 低优先（可做可不做）：统一提示语、魔法数字提取常量、`PageResult` 死代码构造器
+4. 低优先（可做可不做）：统一提示语、`JwtProperties` 改用 `@EnableConfigurationProperties`
+5. **可选**：给仓库补 **Maven Wrapper（`mvnw`）** —— 现在克隆下来的人既没有 `mvnw` 也没有 `mvn`（`.mvn` 目录是空的），只能靠 IDEA 打开才能构建
 
 ### 知识侧
 
@@ -772,6 +834,6 @@ public Result<?> selectList(@Valid @ModelAttribute PageQueryDTO pageQueryDTO)
    —— 这一题能把 9.16～9.19 学的全串起来，是面试的综合题
 6. **操作系统**（学习路线第二阶段还剩这块：进程/线程、内存管理、IO 模型）
 7. 11 月启动简历 + JavaGuide 八股文系统刷题；12 月海投
-8. 10 月底前决定第二个项目（当前只有 Learning 一个主力项目）
+8. ~~10 月底前决定第二个项目~~ —— **已定：海南麻将联机版（已上线，见辅导任务侧 `HANDOFF.md` 第五节）**。接下来的重点是**把它吃透**（按那四条调用链），Learning 收尾 + 海麻吃透，两个项目就够撑简历
 
 

@@ -1,7 +1,7 @@
 # 文章模块 Postman 测试文档
 
 > 项目：Learning（Spring Boot 2.7.18）
-> Base URL：`http://localhost:8080`
+> Base URL：`http://localhost:8081`
 > 前置：`tb_article` 表已建好，应用已启动
 
 ---
@@ -18,7 +18,7 @@
 
 | 变量名 | 初始值 | 用途 |
 | --- | --- | --- |
-| `baseUrl` | `http://localhost:8080` | |
+| `baseUrl` | `http://localhost:8081` | |
 | `token` | 留空 | 存账号 A 的 token |
 | `tokenB` | 留空 | 存账号 B 的 token |
 

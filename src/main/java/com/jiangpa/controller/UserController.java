@@ -8,6 +8,8 @@ import com.jiangpa.dto.UpdatePasswordDTO;
 import com.jiangpa.dto.UserRoleUpdateDTO;
 import com.jiangpa.dto.UpdateNicknameDTO;
 import com.jiangpa.service.UserService;
+import com.jiangpa.config.Knife4jConfig;
+import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 import org.springframework.web.bind.annotation.*;
 
 import javax.validation.Valid;
@@ -15,6 +17,8 @@ import javax.validation.Valid;
 
 @RestController
 @RequestMapping("/user")
+// ★ 必须声明在【接口级】，原因见 Knife4jConfig（Knife4j 不读根级 security）
+@SecurityRequirement(name = Knife4jConfig.SECURITY_SCHEME_NAME)
 public class UserController {
 
     private final UserService userService;

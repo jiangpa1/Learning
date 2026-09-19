@@ -102,5 +102,18 @@
         </dependency>
 
 
+        <!--    接口文档：Knife4j（基于 springdoc 的 OpenAPI 3 增强 UI）
+                ⚠️ 坐标是这个，别抄成 knife4j-openapi3-jakarta-spring-boot-starter ——
+                   那个是给 Spring Boot 3 / jakarta 用的，本项目是 2.7 / javax，会直接起不来。
+                它的底层是 springdoc-openapi-ui 1.6.x（不是 springfox）——
+                   springfox 3.0 在 Spring Boot 2.6+ 会因为默认路径匹配改成 PathPatternParser 而报
+                   "Failed to start bean documentationPluginsBootstrapper"，springdoc 没这个问题。    -->
+        <dependency>
+            <groupId>com.github.xiaoymin</groupId>
+            <artifactId>knife4j-openapi3-spring-boot-starter</artifactId>
+            <version>4.5.0</version>
+        </dependency>
+
+
     </dependencies>
 </project>

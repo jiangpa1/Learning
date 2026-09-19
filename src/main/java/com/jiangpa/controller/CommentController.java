@@ -5,12 +5,16 @@ import com.jiangpa.common.Result;
 import com.jiangpa.dto.CommentDTO;
 import com.jiangpa.dto.PageQueryDTO;
 import com.jiangpa.service.CommentService;
+import com.jiangpa.config.Knife4jConfig;
+import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 import org.springframework.web.bind.annotation.*;
 
 import javax.validation.Valid;
 
 @RestController
 @RequestMapping("/comment")
+// ★ 必须声明在【接口级】，原因见 Knife4jConfig（Knife4j 不读根级 security）
+@SecurityRequirement(name = Knife4jConfig.SECURITY_SCHEME_NAME)
 public class CommentController {
 
     private final CommentService commentService;

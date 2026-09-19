@@ -1,7 +1,7 @@
 # Postman 接口测试文档
 
 > 项目：Learning（Spring Boot 2.7.18）
-> Base URL：`http://localhost:8080`
+> Base URL：`http://localhost:8081`
 
 ---
 
@@ -31,7 +31,7 @@
 
 | 变量名 | 初始值 | 类型 |
 | --- | --- | --- |
-| `baseUrl` | `http://localhost:8080` | default |
+| `baseUrl` | `http://localhost:8081` | default |
 | `token` | 留空 | default（secret 可不开，方便查看） |
 
 建好之后**记得在右上角的下拉框里选中这个环境**，不选的话 `{{baseUrl}}` 会原样发出去。
